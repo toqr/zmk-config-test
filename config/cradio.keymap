@@ -1,24 +1,7 @@
-/*
- * Copyright (c) 2020 The ZMK Contributors
- *
- * SPDX-License-Identifier: MIT
- */
-
 #include <behaviors.dtsi>
 #include <dt-bindings/zmk/bt.h>
 #include <dt-bindings/zmk/keys.h>
 
-// Layer definitions
-
-#define BASE 0
-#define SYM 1
-#define EXT 2
-#define FNC 3
-#define SYM2 4
-#define ACCENT 5
-#define SETTINGS 6
-
-// -----------------
 
 &mt {
     //  flavor = "tap-preferred";
@@ -29,8 +12,7 @@
 
 / {
     macros {
-        // sometimes my device thinks a modifier is being held down
-        // pressing all modifiers fixes it.
+
 
         unstick: unstick {
             label = "ZM_unstick";
@@ -51,8 +33,7 @@
             bindings = <&mo 5>;
         };
 
-        // internal-left & external-right thumb keys
-        // both left thumb keys
+
 
         numpad-layer {
             timeout-ms = <300>;
@@ -64,7 +45,7 @@
     keymap {
         compatible = "zmk,keymap";
 
-        // Base alpha layer
+
 
         default_layer {
             bindings = <
@@ -75,7 +56,7 @@
             >;
         };
 
-        // Numbers and high frequency symbols
+
 
         numbers-R2 {
             bindings = <
@@ -86,7 +67,7 @@
             >;
         };
 
-        // Main modifiers and arrow keys
+
 
         extend-L1 {
             bindings = <
@@ -97,7 +78,7 @@
             >;
         };
 
-        // Function keys with modifiers
+
 
         function-L1+R2 {
             bindings = <
@@ -108,7 +89,7 @@
             >;
         };
 
-        // Low frequency symbols.
+
 
         numpad-L1+L2 {
             bindings = <
@@ -119,7 +100,7 @@
             >;
         };
 
-        // Used to type regional accents.
+
 
         media-R1+R2 {
             bindings = <
@@ -130,6 +111,5 @@
             >;
         };
 
-        // Used to change the keyboard's settings.
     };
 };
