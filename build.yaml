@@ -1,25 +1,69 @@
-# This file generates the GitHub Actions matrix.
-# For simple board + shield combinations, add them to the top level board and
-# shield arrays, for more control, add individual board + shield combinations
-# to the `include` property. You can also use the `cmake-args` property to
-# pass flags to the build command, `snippet` to add a Zephyr snippet, and
-# `artifact-name` to assign a name to distinguish build outputs from each other:
-#
-# board: [ "nice_nano" ]
-# shield: [ "corne_left", "corne_right" ]
-# include:
-#   - board: bdn9_rev2
-#   - board: nice_nano
-#     shield: reviung41
-#   - board: nice_nano
-#     shield: corne_left
-#     snippet: studio-rpc-usb-uart
-#     cmake-args: -DCONFIG_ZMK_STUDIO=y
-#     artifact-name: corne_left_with_studio
-#
----
-include:
-  - board: nrfmicro/nrf52840
-    shield: cradio_left
-  - board: nrfmicro/nrf52840
-    shield: cradio_right
+on: [push, pull_request, workflow_dispatch]
+
+name: Build
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: zmkfirmware/zmk-build-arm:stable
+    name: Build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Cache west modules
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-zephyr-modules
+        with:
+          path: |
+            modules/
+            tools/
+            zephyr/
+            bootloader/
+            zmk/
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('manifest-dir/west.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+
+      - name: West Init
+        run: west init -l config
+
+      - name: West Update
+        run: west update
+
+      - name: West Zephyr export
+        run: west zephyr-export
+
+      - name: West Build (Cradio/Sweep Left)
+        run: west build -s zmk/app -b nice_nano_v2 -- -DSHIELD=cradio_left -DZMK_CONFIG="${GITHUB_WORKSPACE}/config"
+
+      - name: Cradio/Sweep Left Kconfig file
+        run: cat build/zephyr/.config | grep -v "^#" | grep -v "^$"
+
+      - name: Rename zmk.uf2
+        run: cp build/zephyr/zmk.uf2 cradio_left_nice_nano_v2.uf2
+
+      - name: Archive (Cradio/Sweep Left)
+        uses: actions/upload-artifact@v3
+        with:
+          name: firmware-zmk-sweep
+          path: cradio_left_nice_nano_v2.uf2
+
+      - name: West Build (Cradio/Sweep Right)
+        run: west build --pristine -s zmk/app -b nice_nano_v2 -- -DSHIELD=cradio_right -DZMK_CONFIG="${GITHUB_WORKSPACE}/config"
+
+      - name: Cradio/Sweep Right Kconfig file
+        run: cat build/zephyr/.config | grep -v "^#" | grep -v "^$"
+
+      - name: Rename zmk.uf2
+        run: cp build/zephyr/zmk.uf2 cradio_right_nice_nano_v2.uf2
+
+      - name: Archive (Cradio/Sweep Right)
+        uses: actions/upload-artifact@v3
+        with:
+          name: firmware-zmk-sweep
+          path: cradio_right_nice_nano_v2.uf2
