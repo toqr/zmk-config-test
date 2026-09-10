@@ -119,9 +119,9 @@
 
         symbols_2_layer {
             bindings = <
-&none  &none  &kp A  &kp A  &kp A    &none  &none  &none  &none  &none
-&kp A  &none  &kp A  &kp A  &kp A    &none  &none  &none  &none  &none
-&none  &none  &kp A  &kp A  &kp A    &none  &none  &none  &none  &none
+&none  &none  &none  &none  &none    &none  &none  &none  &none  &none
+&none  &none  &none  &none  &none    &none  &none  &none  &none  &none
+&none  &none  &none  &none  &none    &none  &none  &none  &none  &none
                      &none  &none    &none  &none
             >;
         };
@@ -130,9 +130,9 @@
 
         accent_layer {
             bindings = <
-&none  &none  &none  &kp A  &none    &none  &none  &none  &none  &none
-&kp A  &kp A  &kp A  &kp A  &kp A    &none  &none  &none  &none  &none
-&none  &none  &none  &kp A  &none    &none  &none  &none  &none  &none
+&none  &none  &none  &none  &none    &none  &none  &none  &none  &none
+&none  &none  &none  &none  &none    &none  &none  &none  &none  &none
+&none  &none  &none  &none  &none    &none  &none  &none  &none  &none
                      &none  &none    &none  &none
             >;
         };
