@@ -48,7 +48,7 @@
         combo_accent {
             timeout-ms = <300>;
             key-positions = <32 33>;
-            bindings = <&mo 5>;
+            bindings = <&mo 4>;
         };
 
         // internal-left & external-right thumb keys
@@ -61,10 +61,10 @@
 
         // both left thumb keys
 
-        combo_settings {
+        numpad_layer {
             timeout-ms = <300>;
             key-positions = <30 31>;
-            bindings = <&mo 6>;
+            bindings = <&mo 4>;
         };
     };
 
@@ -108,21 +108,21 @@
 
         function-L1+R2 {
             bindings = <
-&kp F1     &kp F2    &kp F3        &kp F4  &kp F5    &kp F6  &kp F7  &kp F8  &kp F9   &kp F10
-&sk LCTRL  &sk LALT  &sk LEFT_GUI  &none   &none     &none   &none   &none   &kp F11  &kp F12
-&none      &none     &none         &none   &none     &none   &none   &none   &none    &none
-                                   &none   &none     &none   &none
+&kp F1     &kp F2    &kp F3        &kp F4  &kp F5    &kp F6        &kp F7        &kp F8        &kp F9   &kp F10
+&sk LCTRL  &sk LALT  &sk LEFT_GUI  &none   &none     &none         &none         &none         &kp F11  &kp F12
+&none      &none     &none         &none   &none     &bt BT_SEL 0  &bt BT_SEL 1  &bt BT_SEL 2  &none    &none
+                                   &trans  &none     &none         &trans
             >;
         };
 
         // Low frequency symbols.
 
-        symbols_2_layer {
+        numpad-L1+L2 {
             bindings = <
-&none  &none  &none  &none  &none    &none  &none  &none  &none  &none
-&none  &none  &none  &none  &none    &none  &none  &none  &none  &none
-&none  &none  &none  &none  &none    &none  &none  &none  &none  &none
-                     &none  &none    &none  &none
+&none  &none  &none  &none   &none     &none  &none  &none  &none  &none
+&none  &none  &none  &none   &none     &none  &none  &none  &none  &none
+&none  &none  &none  &none   &none     &none  &none  &none  &none  &none
+                     &trans  &trans    &none  &none
             >;
         };
 
