@@ -61,8 +61,8 @@
         extend-L1 {
             bindings = <
 &kp ESC           &kp GRAVE     &kp TILDE     &none      &kp TAB           &kp MINUS  &kp DELETE  &kp UP    &kp EQUAL  &kp BACKSPACE
-&sk LEFT_CONTROL  &sk LEFT_ALT  &sk LEFT_WIN  &kp SPACE  &sk LEFT_SHIFT    &none      &kp LEFT    &kp DOWN  &kp RIGHT  &kp ENTER
-&none             &none         &none         &none      &none             &none      &none       &none     &none      &none
+&sk LEFT_CONTROL  &sk LEFT_ALT  &sk LEFT_WIN  &kp SPACE  &sk LEFT_SHIFT    &kp N1     &kp LEFT    &kp DOWN  &kp RIGHT  &kp ENTER
+&none             &none         &none         &none      &none             &kp N2     &kp N3      &kp N4    &kp N5     &kp N6
                                               &trans     &to 4             &none      &mo 3
             >;
         };
