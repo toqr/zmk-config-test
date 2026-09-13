@@ -51,10 +51,10 @@
 
         numbers-R2 {
             bindings = <
-&kp N1             &kp N2                 &kp N3           &kp N4            &kp N5            &kp N6      &kp N7     &kp N8     &kp N9     &kp N0
-&kp SQT            &kp LEFT_PARENTHESIS   &kp LEFT_BRACE   &kp LEFT_BRACKET  &kp BACKSLASH     &kp MINUS   &kp EQUAL  &kp GRAVE  &kp TILDE  &kp ENTER
-&kp DOUBLE_QUOTES  &kp RIGHT_PARENTHESIS  &kp RIGHT_BRACE  &kp RBKT          &kp PIPE          &kp DELETE  &none      &none      &none      &kp BACKSPACE
-                                                           &mo 3             &kp LEFT_SHIFT    &tog 5      &trans
+&kp N1             &kp N2           &kp N3             &kp N4                 &kp N5            &kp N6      &kp N7     &kp N8     &kp N9     &kp N0
+&kp SQT            &kp LEFT_BRACE   &kp LEFT_BRACKET   &kp LEFT_PARENTHESIS   &kp BACKSLASH     &kp MINUS   &kp EQUAL  &kp GRAVE  &kp TILDE  &kp ENTER
+&kp DOUBLE_QUOTES  &kp RIGHT_BRACE  &kp RIGHT_BRACKET  &kp RIGHT_PARENTHESIS  &kp PIPE          &kp DELETE  &none      &none      &none      &kp BACKSPACE
+                                                       &mo 3                  &kp LEFT_SHIFT    &tog 5      &trans
             >;
         };
 
