@@ -9,14 +9,14 @@
 &sk { ignore-modifiers; };
 &mmv {
     time-to-max-speed-ms = <400>;         // default: 300
-    acceleration-exponent = <1>;
-    delay-ms = <0>;                   // 0
+    acceleration-exponent = <1>;          // default: 1
+    delay-ms = <0>;                       // default: 0
 };
 
 &msc {
     time-to-max-speed-ms = <300>;         // default: 300
-    acceleration-exponent = <1>;         // default: 0
-    delay-ms = <0>;                   // 0
+    acceleration-exponent = <0>;          // default: 0
+    delay-ms = <0>;                       // default: 0
 };
 
 / {
