@@ -20,13 +20,6 @@
 #include <dt-bindings/zmk/keys.h>
 #include <dt-bindings/zmk/pointing.h>
 
-&mt {
-    //  flavor = "tap-preferred";
-    // tapping_term_ms = <200>;
-};
-
-&sk { ignore-modifiers; };
-
 / {
     macros {
         unstick: unstick {
@@ -120,10 +113,10 @@
 
         mouse-L2+R1 {
             bindings = <
-&tog 6  &none  &none  &none  &none    &msc SCRL_LEFT  &msc SCRL_DOWN  &msc SCRL_UP  &msc SCRL_RIGHT  &tog 6
-&none   &none  &none  &none  &none    &mmv MOVE_LEFT  &mmv MOVE_DOWN  &mmv MOVE_UP  &mmv MOVE_RIGHT  &none
-&none   &none  &none  &none  &none    &none           &none           &none         &none            &none
-                      &none  &none    &mkp LCLK       &mkp RCLK
+&msc MOVE_Y(-20)  &msc MOVE_Y(-5)    &mmv MOVE_Y(600)   &msc MOVE_Y(5)    &msc MOVE_Y(20)    &msc SCRL_LEFT  &msc SCRL_DOWN  &mmv MOVE_UP    &msc SCRL_UP     &msc SCRL_RIGHT
+&none             &mmv MOVE_X(-100)  &mmv MOVE_Y(-600)  &mmv MOVE_X(100)  &none              &none           &mmv MOVE_LEFT  &mmv MOVE_DOWN  &mmv MOVE_RIGHT  &none
+&tog 6            &none              &none              &none             &mkp MCLK          &mkp MCLK       &none           &none           &none            &tog 6
+                                                        &mkp RCLK         &mkp LCLK          &mkp LCLK       &mkp RCLK
             >;
         };
     };
