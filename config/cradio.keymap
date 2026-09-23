@@ -95,17 +95,17 @@
 
         numpad-L1+L2 {
             bindings = <
-&kp ESC         &kp C_NEXT        &kp C_BRIGHTNESS_INC  &kp C_VOLUME_UP    &kp TAB      &kp KP_DIVIDE    &kp KP_NUMBER_7  &kp KP_NUMBER_8  &kp KP_NUMBER_9  &kp KP_PLUS
-&kp LEFT_SHIFT  &kp C_PREVIOUS    &kp C_BRIGHTNESS_DEC  &kp C_VOLUME_DOWN  &kp SPACE    &kp KP_MULTIPLY  &kp KP_NUMBER_4  &kp KP_NUMBER_5  &kp KP_NUMBER_6  &kp KP_ENTER
-&tog 4          &kp C_PLAY_PAUSE  &none                 &kp C_MUTE         &none        &kp KP_SUBTRACT  &kp KP_NUMBER_1  &kp KP_NUMBER_2  &kp KP_NUMBER_3  &kp KP_DOT
-                                                        &trans             &trans       &kp BACKSPACE    &kp NUMBER_0
+&kp ESC  &kp C_NEXT        &kp C_BRIGHTNESS_INC  &kp C_VOLUME_UP    &kp TAB      &kp KP_DIVIDE    &kp KP_NUMBER_7  &kp KP_NUMBER_8  &kp KP_NUMBER_9  &kp KP_PLUS
+&tog 6   &kp C_PREVIOUS    &kp C_BRIGHTNESS_DEC  &kp C_VOLUME_DOWN  &kp SPACE    &kp KP_MULTIPLY  &kp KP_NUMBER_4  &kp KP_NUMBER_5  &kp KP_NUMBER_6  &kp KP_ENTER
+&tog 4   &kp C_PLAY_PAUSE  &none                 &kp C_MUTE         &none        &kp KP_SUBTRACT  &kp KP_NUMBER_1  &kp KP_NUMBER_2  &kp KP_NUMBER_3  &kp KP_DOT
+                                                 &trans             &trans       &kp BACKSPACE    &kp NUMBER_0
             >;
         };
 
         mirrorNumpad-R1+R2 {
             bindings = <
 &kp KP_PLUS   &kp KP_N7  &kp KP_N8  &kp KP_N9  &kp KP_DIVIDE      &kp TAB    &kp C_VOLUME_UP    &kp C_BRIGHTNESS_INC  &kp C_NEXT        &kp ESC
-&kp KP_ENTER  &kp KP_N4  &kp KP_N5  &kp KP_N6  &kp KP_MULTIPLY    &kp SPACE  &kp C_VOLUME_DOWN  &kp C_BRIGHTNESS_DEC  &kp C_PREVIOUS    &kp LSHFT
+&kp KP_ENTER  &kp KP_N4  &kp KP_N5  &kp KP_N6  &kp KP_MULTIPLY    &kp SPACE  &kp C_VOLUME_DOWN  &kp C_BRIGHTNESS_DEC  &kp C_PREVIOUS    &tog 6
 &kp KP_DOT    &kp KP_N1  &kp KP_N2  &kp KP_N3  &kp KP_MINUS       &none      &kp C_MUTE         &none                 &kp C_PLAY_PAUSE  &tog 5
                                     &kp KP_N0  &kp BSPC           &trans     &trans
             >;
