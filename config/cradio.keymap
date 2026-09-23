@@ -115,7 +115,7 @@
             bindings = <
 &msc SCRL_LEFT  &msc SCRL_DOWN  &mmv MOVE_UP    &msc SCRL_UP     &msc SCRL_RIGHT    &msc SCRL_LEFT  &msc SCRL_DOWN  &mmv MOVE_UP    &msc SCRL_UP     &msc SCRL_RIGHT
 &none           &mmv MOVE_LEFT  &mmv MOVE_DOWN  &mmv MOVE_RIGHT  &none              &none           &mmv MOVE_LEFT  &mmv MOVE_DOWN  &mmv MOVE_RIGHT  &none
-&tog 6          &none           &none           &none            &mkp MCLK          &mkp MCLK       &none           &none           &none            &tog 6
+&tog 6          &none           &mkp MB5        &mkp MB4         &mkp MCLK          &mkp MCLK       &mkp MB4        &mkp MB5        &none            &tog 6
                                                 &mkp RCLK        &mkp LCLK          &mkp LCLK       &mkp RCLK
             >;
         };
