@@ -38,7 +38,7 @@
         media-layer {
             timeout-ms = <250>;
             key-positions = <32 33>;
-            bindings = <&mo 5>;
+            bindings = <&mo 6>;
         };
 
         numpad-layer {
@@ -48,7 +48,7 @@
         };
 
         mouse-layer {
-            bindings = <&tog 6>;
+            bindings = <&tog 0>;
             key-positions = <31 32>;
             timeout-ms = <51>;
         };
@@ -62,16 +62,7 @@
 &kp Q  &kp W  &kp E  &kp R  &kp T        &kp Y           &kp U  &kp I      &kp O    &kp P
 &kp A  &kp S  &kp D  &kp F  &kp G        &kp H           &kp J  &kp K      &kp L    &kp SEMICOLON
 &kp Z  &kp X  &kp C  &kp V  &kp B        &kp N           &kp M  &kp COMMA  &kp DOT  &kp SLASH
-                     &mo 2  &kp SPACE    &kp LEFT_SHIFT  &mo 1
-            >;
-        };
-
-        numbers-R2 {
-            bindings = <
-&kp N1             &kp N2           &kp N3             &kp N4                 &kp N5            &kp N6      &kp N7         &kp N8    &kp N9     &kp N0
-&kp SQT            &kp LEFT_BRACE   &kp LEFT_BRACKET   &kp LEFT_PARENTHESIS   &kp BACKSLASH     &kp MINUS   &kp EQUAL      &kp UP    &kp SPACE  &kp ENTER
-&kp DOUBLE_QUOTES  &kp RIGHT_BRACE  &kp RIGHT_BRACKET  &kp RIGHT_PARENTHESIS  &kp PIPE          &kp DELETE  &kp BACKSPACE  &kp DOWN  &kp LEFT   &kp RIGHT
-                                                       &mo 3                  &kp LEFT_SHIFT    &tog 5      &trans
+                     &mo 1  &kp SPACE    &kp LEFT_SHIFT  &mo 2
             >;
         };
 
@@ -81,6 +72,15 @@
 &sk LEFT_CONTROL  &sk LEFT_ALT  &sk LEFT_WIN  &kp SPACE   &kp CAPSLOCK    &kp LEFT    &kp DOWN   &kp UP      &kp RIGHT  &kp ENTER
 &kp LG(Z)         &kp LG(X)     &kp LG(C)     &kp LG(V)   &kp LG(L)       &kp N1      &kp N2     &kp N3      &kp N4     &kp N5
                                               &trans      &tog 4          &none       &mo 3
+            >;
+        };
+
+        numbers-R2 {
+            bindings = <
+&kp N1             &kp N2           &kp N3             &kp N4                 &kp N5            &kp N6      &kp N7         &kp N8    &kp N9     &kp N0
+&kp SQT            &kp LEFT_BRACE   &kp LEFT_BRACKET   &kp LEFT_PARENTHESIS   &kp BACKSLASH     &kp MINUS   &kp EQUAL      &kp UP    &kp SPACE  &kp ENTER
+&kp DOUBLE_QUOTES  &kp RIGHT_BRACE  &kp RIGHT_BRACKET  &kp RIGHT_PARENTHESIS  &kp PIPE          &kp DELETE  &kp BACKSPACE  &kp DOWN  &kp LEFT   &kp RIGHT
+                                                       &mo 3                  &kp LEFT_SHIFT    &tog 6      &trans
             >;
         };
 
@@ -96,7 +96,7 @@
         numpad-L1+L2 {
             bindings = <
 &kp ESC  &kp C_NEXT        &kp C_BRIGHTNESS_INC  &kp C_VOLUME_UP    &kp TAB      &kp KP_DIVIDE    &kp KP_NUMBER_7  &kp KP_NUMBER_8  &kp KP_NUMBER_9  &kp KP_PLUS
-&tog 6   &kp C_PREVIOUS    &kp C_BRIGHTNESS_DEC  &kp C_VOLUME_DOWN  &kp SPACE    &kp KP_MULTIPLY  &kp KP_NUMBER_4  &kp KP_NUMBER_5  &kp KP_NUMBER_6  &kp KP_ENTER
+&tog 0   &kp C_PREVIOUS    &kp C_BRIGHTNESS_DEC  &kp C_VOLUME_DOWN  &kp SPACE    &kp KP_MULTIPLY  &kp KP_NUMBER_4  &kp KP_NUMBER_5  &kp KP_NUMBER_6  &kp KP_ENTER
 &tog 4   &kp C_PLAY_PAUSE  &none                 &kp C_MUTE         &none        &kp KP_SUBTRACT  &kp KP_NUMBER_1  &kp KP_NUMBER_2  &kp KP_NUMBER_3  &kp KP_DOT
                                                  &trans             &trans       &kp BACKSPACE    &kp NUMBER_0
             >;
@@ -105,8 +105,8 @@
         mirrorNumpad-R1+R2 {
             bindings = <
 &kp KP_PLUS   &kp KP_N7  &kp KP_N8  &kp KP_N9  &kp KP_DIVIDE      &kp TAB    &kp C_VOLUME_UP    &kp C_BRIGHTNESS_INC  &kp C_NEXT        &kp ESC
-&kp KP_ENTER  &kp KP_N4  &kp KP_N5  &kp KP_N6  &kp KP_MULTIPLY    &kp SPACE  &kp C_VOLUME_DOWN  &kp C_BRIGHTNESS_DEC  &kp C_PREVIOUS    &tog 6
-&kp KP_DOT    &kp KP_N1  &kp KP_N2  &kp KP_N3  &kp KP_MINUS       &none      &kp C_MUTE         &none                 &kp C_PLAY_PAUSE  &tog 5
+&kp KP_ENTER  &kp KP_N4  &kp KP_N5  &kp KP_N6  &kp KP_MULTIPLY    &kp SPACE  &kp C_VOLUME_DOWN  &kp C_BRIGHTNESS_DEC  &kp C_PREVIOUS    &tog 0
+&kp KP_DOT    &kp KP_N1  &kp KP_N2  &kp KP_N3  &kp KP_MINUS       &none      &kp C_MUTE         &none                 &kp C_PLAY_PAUSE  &tog 6
                                     &kp KP_N0  &kp BSPC           &trans     &trans
             >;
         };
@@ -114,8 +114,8 @@
         mouse-L2+R1 {
             bindings = <
 &msc SCRL_LEFT  &msc SCRL_DOWN  &mmv MOVE_UP    &msc SCRL_UP     &msc SCRL_RIGHT    &msc SCRL_LEFT  &msc SCRL_DOWN  &mmv MOVE_UP    &msc SCRL_UP     &msc SCRL_RIGHT
-&none           &mmv MOVE_LEFT  &mmv MOVE_DOWN  &mmv MOVE_RIGHT  &none              &none           &mmv MOVE_LEFT  &mmv MOVE_DOWN  &mmv MOVE_RIGHT  &none
-&tog 6          &none           &mkp MB5        &mkp MB4         &mkp MCLK          &mkp MCLK       &mkp MB4        &mkp MB5        &none            &tog 6
+&kp ESC         &mmv MOVE_LEFT  &mmv MOVE_DOWN  &mmv MOVE_RIGHT  &kp LEFT_SHIFT     &kp LEFT_SHIFT  &mmv MOVE_LEFT  &mmv MOVE_DOWN  &mmv MOVE_RIGHT  &kp ESC
+&tog 6          &kp LEFT_ALT    &mkp MB5        &mkp MB4         &mkp MCLK          &mkp MCLK       &mkp MB4        &mkp MB5        &kp LEFT_ALT     &tog 6
                                                 &mkp RCLK        &mkp LCLK          &mkp LCLK       &mkp RCLK
             >;
         };
