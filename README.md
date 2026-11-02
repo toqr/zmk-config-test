@@ -1,4 +1,5 @@
 # zmk-config-test
 
-edit with
-https://nickcoutsos.github.io/keymap-editor/
+used to edit with https://nickcoutsos.github.io/keymap-editor/ but it depreciated
+
+edit directly from keymap file
