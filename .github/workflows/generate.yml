@@ -1,0 +1,40 @@
+name: Generate Keymap PDF
+
+on:
+  push:
+    paths:
+      - 'config/cradio.keymap'
+      - 'generate.py'
+      - '.github/workflows/generate.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install reportlab
+
+      - name: Generate PDF
+        run: |
+          mkdir -p visualizer-pdf
+          python generate.py
+
+      - name: Commit PDF
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add visualizer-pdf/
+          git diff --cached --quiet || git commit -m "Update keymap PDF"
+          git push
