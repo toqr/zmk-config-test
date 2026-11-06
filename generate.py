@@ -7,7 +7,6 @@ import fitz
 
 output = BytesIO()
 pdf = canvas.Canvas(output, pagesize=letter)
-
 pdf.drawString(100, 750, "Hello World!")
 
 pdf.save()
