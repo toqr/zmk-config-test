@@ -28,7 +28,7 @@ jobs:
 
       - name: Generate PDF
         run: |
-          mkdir -p visualizer-pdf
+          mkdir -p previous-keymaps-visualizer
           python generate.py
 
       - name: Commit PDF
