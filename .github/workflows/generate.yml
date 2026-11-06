@@ -35,6 +35,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add visualizer-pdf/
+          git add previous-keymaps-visualizer/ current-keymap.pdf
           git diff --cached --quiet || git commit -m "Update keymap PDF"
           git push
