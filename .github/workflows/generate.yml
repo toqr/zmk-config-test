@@ -24,14 +24,14 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install reportlab
+        run: pip install reportlab pymupdf
 
-      - name: Generate PDF
+      - name: Generate PDF and PNG
         run: |
           mkdir -p previous-keymaps-visualizer
           python generate.py
 
-      - name: Commit PDF
+      - name: Commit generated files
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
