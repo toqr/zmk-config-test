@@ -6,7 +6,7 @@ zmk_visualizer.py - turn a ZMK .keymap into a 2-page PDF.
     python3 zmk_visualizer.py my.keymap -o out.pdf --open
     python3 zmk_visualizer.py my.keymap --rows 10,10,10,4   # only if the key rows can't be detected
 
-The keymap file is looked for in the "conf" folder and nowhere else: give its name, or leave
+The keymap file is looked for in the "config" folder and nowhere else: give its name, or leave
 the name out and the one .keymap file in that folder is used.
 
 Besides the PDF it writes, next to it:
@@ -1780,8 +1780,8 @@ def save_outputs(pdf_bytes, out, src_name, archive=True, scale=2.0):
     return folder, None
 
 
-def find_conf_dir(name="conf"):
-    """The folder the keymap file lives in: "conf" next to where the command is run,
+def find_config_dir(name="config"):
+    """The folder the keymap file lives in: "config" next to where the command is run,
     or - if that is not there - next to this script."""
     here = Path.cwd() / name
     if here.is_dir():
@@ -1792,8 +1792,8 @@ def find_conf_dir(name="conf"):
     return here
 
 
-def find_keymap(conf, arg):
-    """The keymap file, which is only ever looked for inside the conf folder.
+def find_keymap(config, arg):
+    """The keymap file, which is only ever looked for inside the config folder.
 
     With a name, that file in that folder is used; without one, the folder has to
     hold exactly one .keymap file.  A path that is given in full is taken as it
@@ -1805,26 +1805,27 @@ def find_keymap(conf, arg):
             if p.is_file():
                 return p
             raise SystemExit(f"error: no keymap file at {p}")
-        # a plain name: it is looked for in the conf folder and nowhere else
-        for cand in (conf / p.name, conf / (p.stem + ".keymap")):
+        # a plain name: it is looked for in the config folder and nowhere else
+        for cand in (config / p.name, config / (p.stem + ".keymap")):
             if cand.is_file():
                 return cand
-        raise SystemExit(f"error: no keymap file {arg!r} in {conf}")
-    found = sorted(conf.glob("*.keymap"))
+        raise SystemExit(f"error: no keymap file {arg!r} in {config}")
+    found = sorted(config.glob("*.keymap"))
     if not found:
-        raise SystemExit(f"error: no .keymap file in {conf}")
+        raise SystemExit(f"error: no .keymap file in {config}")
     if len(found) > 1:
         names = ", ".join(f.name for f in found)
-        raise SystemExit(f"error: {conf} holds more than one keymap ({names}); "
+        raise SystemExit(f"error: {config} holds more than one keymap ({names}); "
                          f"say which one to use")
     return found[0]
 
 
 def main():
     ap = argparse.ArgumentParser(description="Draw a ZMK keymap as a 2-page PDF: layer flow chart + keymap text.")
-    ap.add_argument("keymap", nargs="?", help="name of the keymap file inside the conf folder")
+    ap.add_argument("keymap", nargs="?", help="name of the keymap file inside the config folder")
     ap.add_argument("-o", "--output", help="output PDF (default: <keymap>.pdf in the current folder)")
-    ap.add_argument("--conf", default="conf", help="folder the keymap file is in (default: conf)")
+    ap.add_argument("--config", default="config",
+                    help="folder the keymap file is in (default: config)")
     ap.add_argument("--rows", help="keys per row, e.g. 10,10,10,4 (only if auto-detection fails)")
     ap.add_argument("--open", action="store_true", help="open the PDF when done")
     ap.add_argument("--no-archive", action="store_true",
@@ -1833,13 +1834,13 @@ def main():
                     help="zoom of the preview.png snapshot (default: 2)")
     a = ap.parse_args()
 
-    conf = find_conf_dir(a.conf)
-    path = find_keymap(conf, a.keymap)
+    config = find_config_dir(a.config)
+    path = find_keymap(config, a.keymap)
     text = path.read_text(encoding="utf-8", errors="replace")
     rows = [int(x) for x in a.rows.split(",")] if a.rows else None
     layers, combos, row_lens, defines = parse_keymap(text, rows)
     # the PDF and the copies of it go in the folder the command is run from, not
-    # in the conf folder with the keymap
+    # in the config folder with the keymap
     out = Path(a.output) if a.output else Path.cwd() / (path.stem + ".pdf")
     pages = [flow_page(layers, combos, row_lens, defines, path.name),
              text_page(keymap_text(text, sum(row_lens)), path.name)]
