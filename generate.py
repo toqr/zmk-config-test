@@ -14,6 +14,8 @@ Besides the PDF it writes, next to it:
     previous-keymaps-visualizer/keymap-YYYY-MM-DD.pdf - a dated copy, so you can look back
     preview.png                                   - a snapshot of the flow chart (page 1)
 Use --no-archive to write only the PDF, and --preview-scale to change the zoom of the snapshot.
+The snapshot is scaled down when needed so that it stays below the size at which image tools
+refuse to open it; the PDF itself is vector, so it stays sharp at any zoom.
 
 Page 1 - FLOW CHART. Every layer is a node, placed left to right by how many steps it is from the base
          layer; the layers of one column are stacked and lined up with the layers they connect to.
@@ -970,10 +972,10 @@ def flow_page(layers, combos, row_lens, defines, src_name):
     board, mini = Board(row_lens, KS, GAP, SPLIT), Board(row_lens, 26, 5, 30)
     PAD, HD, PADB = 28, 118, 34
     nw = board.w + 2 * PAD
-    PM, HEAD = 118, 430
+    PM, HEAD = 112, 430
     TOP0 = PM + HEAD
     VGAP = 140
-    GM, LANE = 96, 104
+    GM, LANE = 76, 86
     ids = [L["idx"] for L in layers]
 
     # ---------- columns: how many steps each layer is away from the base layer
@@ -1080,8 +1082,11 @@ def flow_page(layers, combos, row_lens, defines, src_name):
     RIGHT_ROLES = ("ascF", "same", "descB", "ascB")
     CW = {}
     for c in range(max(0, ncols - 1)):
-        n = len(ch_tasks[c])
-        CW[c] = 2 * GM + LANE * n if n else 2 * GM
+        # the lanes of the left group grow to the right, those of the right group grow
+        # to the left, so the two groups only need one lane of clearance between them
+        nl = sum(1 for t in ch_tasks[c] if t[0] in LEFT_ROLES)
+        nr = sum(1 for t in ch_tasks[c] if t[0] in RIGHT_ROLES)
+        CW[c] = 2 * GM + LANE * (nl + nr - 1) if (nl or nr) else 2 * GM
     XCOL = {0: PM}
     for c in range(1, ncols):
         XCOL[c] = XCOL[c - 1] + nw + CW[c - 1]
@@ -1504,7 +1509,13 @@ def flow_page(layers, combos, row_lens, defines, src_name):
     ncorr = sum(1 for m in emode.values() if m in ("corr", "bwd"))
     CORR = 96 + 96 * max(0, ncorr - 1)
     placed, ch = layout_combos(combos, PW - 2 * PM, mini, layers, defines)
-    PH = bottom + HEAD + ((VGAP + 120 + ch) if combos else 0) + PM + CORR
+    oy = bottom + VGAP + CORR                  # where the combos panel starts
+    # the page ends just below the lowest thing that is actually drawn: the combos
+    # panel, or - when there is none - the corridor lines under the layers
+    if combos:
+        PH = oy + ch + 76 + PM
+    else:
+        PH = bottom + 78 + 96 * max(0, ncorr - 1) + 48 + PM
     c = Canvas(PW, PH, bg=th["bg"])
 
     c.text(PM, PM + 56, src_name, 58, th["title"])
@@ -1640,7 +1651,6 @@ def flow_page(layers, combos, row_lens, defines, src_name):
 
     # ---- 7. combos
     if combos:
-        oy = bottom + VGAP + CORR
         c.text(PM, oy + 44, "combos", 46, th["title"])
         c.text(PM + tw("combos", 46) + 28, oy + 44, "press the red keys together", 26, th["sub"])
         draw_combos(c, placed, PM, oy + 96, mini, th)
@@ -1717,14 +1727,42 @@ def text_page(lines, src_name):
     return c
 
 
-def snapshot_png(pdf_bytes, png_path, scale=2.0):
+# The flow chart page is drawn on a very large sheet, so a PNG snapshot of it
+# comes out at a huge pixel count.  Pillow (and a few other tools) refuse to open
+# images above ~89 megapixels, so the snapshot is scaled down to stay under that
+# limit while still being far sharper than the screen it is looked at on.
+PREVIEW_MAX_PIXELS = 64_000_000
+
+
+def snapshot_png(pdf_bytes, png_path, scale=2.0, max_pixels=PREVIEW_MAX_PIXELS):
     """Render page 1 of the PDF to a PNG, as a quick look at the flow chart.
 
     PyMuPDF is used when it is installed; otherwise the PDF is rasterised with
-    poppler's pdftoppm, which gives the same result."""
+    poppler's pdftoppm, which gives the same result.
+
+    `scale` is the zoom factor (2.0 means twice the size of the PDF page).  It is
+    lowered when needed so that the PNG stays below `max_pixels`; the PDF itself
+    is vector and stays sharp at any zoom."""
+    import math
     import shutil
     import subprocess
     import tempfile
+
+    # the page size is in the PDF's /MediaBox, so the snapshot can be sized
+    # before anything is rendered
+    size = None
+    for m in re.finditer(rb"/MediaBox\s*\[\s*([\d.+-]+)\s+([\d.+-]+)\s+"
+                          rb"([\d.+-]+)\s+([\d.+-]+)\s*\]", pdf_bytes):
+        w = float(m.group(3)) - float(m.group(1))
+        h = float(m.group(4)) - float(m.group(2))
+        size = (w, h)
+        break
+    if size and max_pixels:
+        w, h = size
+        if w > 0 and h > 0:
+            too_big = (w * scale) * (h * scale)
+            if too_big > max_pixels:
+                scale = math.sqrt(max_pixels / too_big)
 
     try:
         import fitz
