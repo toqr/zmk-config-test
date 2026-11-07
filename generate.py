@@ -1789,27 +1789,27 @@ def main():
                     help="zoom of the preview.png snapshot (default: 2)")
     a = ap.parse_args()
 
-    path = Path(a.keymap)
-    text = path.read_text(encoding="utf-8", errors="replace")
-    rows = [int(x) for x in a.rows.split(",")] if a.rows else None
-    layers, combos, row_lens, defines = parse_keymap(text, rows)
-    out = Path(a.output) if a.output else path.with_suffix(".pdf")
-    pages = [flow_page(layers, combos, row_lens, defines, path.name),
-             text_page(keymap_text(text, sum(row_lens)), path.name)]
-    data = build_pdf(pages, path.name)
-    folder, png = save_outputs(data, out, path.name,
-                               archive=not a.no_archive, scale=a.preview_scale)
-    print(f"{path.name}: {len(layers)} layers, {sum(row_lens)} keys {row_lens}, {len(combos)} combos")
-    print(f"wrote {out}")
-    if folder is not None:
-        print(f"wrote {out.parent / 'current-keymap.pdf'}")
-        print(f"wrote {folder / f'keymap-{date.today()}.pdf'}")
-    if png is not None:
-        print(f"wrote {png}")
-    elif folder is not None:
-        print("note: could not render preview.png (no PyMuPDF and no pdftoppm)", file=sys.stderr)
-    if a.open:
-        webbrowser.open(out.resolve().as_uri())
+    for path in Path("config").glob("*.keymap"):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        rows = [int(x) for x in a.rows.split(",")] if a.rows else None
+        layers, combos, row_lens, defines = parse_keymap(text, rows)
+        out = Path(a.output) if a.output else path.with_suffix(".pdf")
+        pages = [flow_page(layers, combos, row_lens, defines, path.name),
+                 text_page(keymap_text(text, sum(row_lens)), path.name)]
+        data = build_pdf(pages, path.name)
+        folder, png = save_outputs(data, out, path.name,
+                                   archive=not a.no_archive, scale=a.preview_scale)
+        print(f"{path.name}: {len(layers)} layers, {sum(row_lens)} keys {row_lens}, {len(combos)} combos")
+        print(f"wrote {out}")
+        if folder is not None:
+            print(f"wrote {out.parent / 'current-keymap.pdf'}")
+            print(f"wrote {folder / f'keymap-{date.today()}.pdf'}")
+        if png is not None:
+            print(f"wrote {png}")
+        elif folder is not None:
+            print("note: could not render preview.png (no PyMuPDF and no pdftoppm)", file=sys.stderr)
+        if a.open:
+            webbrowser.open(out.resolve().as_uri())
 
 
 if __name__ == "__main__":
