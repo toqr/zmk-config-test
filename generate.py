@@ -6,6 +6,9 @@ zmk_visualizer.py - turn a ZMK .keymap into a 2-page PDF.
     python3 zmk_visualizer.py my.keymap -o out.pdf --open
     python3 zmk_visualizer.py my.keymap --rows 10,10,10,4   # only if the key rows can't be detected
 
+The keymap file is looked for in the "conf" folder and nowhere else: give its name, or leave
+the name out and the one .keymap file in that folder is used.
+
 Besides the PDF it writes, next to it:
     current-keymap.pdf                            - a copy of the PDF you just made
     previous-keymaps-visualizer/keymap-YYYY-MM-DD.pdf - a dated copy, so you can look back
@@ -1777,10 +1780,51 @@ def save_outputs(pdf_bytes, out, src_name, archive=True, scale=2.0):
     return folder, None
 
 
+def find_conf_dir(name="conf"):
+    """The folder the keymap file lives in: "conf" next to where the command is run,
+    or - if that is not there - next to this script."""
+    here = Path.cwd() / name
+    if here.is_dir():
+        return here
+    beside = Path(__file__).resolve().parent / name
+    if beside.is_dir():
+        return beside
+    return here
+
+
+def find_keymap(conf, arg):
+    """The keymap file, which is only ever looked for inside the conf folder.
+
+    With a name, that file in that folder is used; without one, the folder has to
+    hold exactly one .keymap file.  A path that is given in full is taken as it
+    is, so that a keymap from somewhere else can still be drawn."""
+    if arg:
+        p = Path(arg)
+        if p.is_absolute() or len(p.parts) > 1:
+            # a path that was spelled out in full - the caller means it
+            if p.is_file():
+                return p
+            raise SystemExit(f"error: no keymap file at {p}")
+        # a plain name: it is looked for in the conf folder and nowhere else
+        for cand in (conf / p.name, conf / (p.stem + ".keymap")):
+            if cand.is_file():
+                return cand
+        raise SystemExit(f"error: no keymap file {arg!r} in {conf}")
+    found = sorted(conf.glob("*.keymap"))
+    if not found:
+        raise SystemExit(f"error: no .keymap file in {conf}")
+    if len(found) > 1:
+        names = ", ".join(f.name for f in found)
+        raise SystemExit(f"error: {conf} holds more than one keymap ({names}); "
+                         f"say which one to use")
+    return found[0]
+
+
 def main():
     ap = argparse.ArgumentParser(description="Draw a ZMK keymap as a 2-page PDF: layer flow chart + keymap text.")
-    ap.add_argument("keymap", help="path to the .keymap file")
-    ap.add_argument("-o", "--output", help="output PDF (default: <keymap>.pdf)")
+    ap.add_argument("keymap", nargs="?", help="name of the keymap file inside the conf folder")
+    ap.add_argument("-o", "--output", help="output PDF (default: <keymap>.pdf in the current folder)")
+    ap.add_argument("--conf", default="conf", help="folder the keymap file is in (default: conf)")
     ap.add_argument("--rows", help="keys per row, e.g. 10,10,10,4 (only if auto-detection fails)")
     ap.add_argument("--open", action="store_true", help="open the PDF when done")
     ap.add_argument("--no-archive", action="store_true",
@@ -1789,27 +1833,31 @@ def main():
                     help="zoom of the preview.png snapshot (default: 2)")
     a = ap.parse_args()
 
-    for path in Path("config").glob("*.keymap"):
-        text = path.read_text(encoding="utf-8", errors="replace")
-        rows = [int(x) for x in a.rows.split(",")] if a.rows else None
-        layers, combos, row_lens, defines = parse_keymap(text, rows)
-        out = Path(a.output) if a.output else path.with_suffix(".pdf")
-        pages = [flow_page(layers, combos, row_lens, defines, path.name),
-                 text_page(keymap_text(text, sum(row_lens)), path.name)]
-        data = build_pdf(pages, path.name)
-        folder, png = save_outputs(data, out, path.name,
-                                   archive=not a.no_archive, scale=a.preview_scale)
-        print(f"{path.name}: {len(layers)} layers, {sum(row_lens)} keys {row_lens}, {len(combos)} combos")
-        print(f"wrote {out}")
-        if folder is not None:
-            print(f"wrote {out.parent / 'current-keymap.pdf'}")
-            print(f"wrote {folder / f'keymap-{date.today()}.pdf'}")
-        if png is not None:
-            print(f"wrote {png}")
-        elif folder is not None:
-            print("note: could not render preview.png (no PyMuPDF and no pdftoppm)", file=sys.stderr)
-        if a.open:
-            webbrowser.open(out.resolve().as_uri())
+    conf = find_conf_dir(a.conf)
+    path = find_keymap(conf, a.keymap)
+    text = path.read_text(encoding="utf-8", errors="replace")
+    rows = [int(x) for x in a.rows.split(",")] if a.rows else None
+    layers, combos, row_lens, defines = parse_keymap(text, rows)
+    # the PDF and the copies of it go in the folder the command is run from, not
+    # in the conf folder with the keymap
+    out = Path(a.output) if a.output else Path.cwd() / (path.stem + ".pdf")
+    pages = [flow_page(layers, combos, row_lens, defines, path.name),
+             text_page(keymap_text(text, sum(row_lens)), path.name)]
+    data = build_pdf(pages, path.name)
+    folder, png = save_outputs(data, out, path.name,
+                               archive=not a.no_archive, scale=a.preview_scale)
+    print(f"{path.name}: {len(layers)} layers, {sum(row_lens)} keys {row_lens}, {len(combos)} combos")
+    print(f"read {path}")
+    print(f"wrote {out}")
+    if folder is not None:
+        print(f"wrote {out.parent / 'current-keymap.pdf'}")
+        print(f"wrote {folder / f'keymap-{date.today()}.pdf'}")
+    if png is not None:
+        print(f"wrote {png}")
+    elif folder is not None:
+        print("note: could not render preview.png (no PyMuPDF and no pdftoppm)", file=sys.stderr)
+    if a.open:
+        webbrowser.open(out.resolve().as_uri())
 
 
 if __name__ == "__main__":
