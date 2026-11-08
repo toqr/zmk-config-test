@@ -74,6 +74,102 @@ def strip_comments(t):
     return re.sub(r"//[^\n]*", "", t)
 
 
+_ONE_LINE_BLOCK = re.compile(r"/\*(?:(?!\*/)[^\n])*\*/")
+SPLIT_MARK = "\x01"
+
+
+def strip_comments_marked(t):
+    """Like strip_comments, but a one-line /* ... */ comment is kept as a marker: it is
+    often put between the two halves of a keyboard, and tells where the split is."""
+    t = _ONE_LINE_BLOCK.sub(SPLIT_MARK, t)
+    return strip_comments(t)
+
+
+def _call_args(s, j):
+    """s[j] == '(' -> ([arguments], index after the closing ')') - or (None, j) if it never closes."""
+    depth, args, cur, k = 0, [], "", j
+    while k < len(s):
+        ch = s[k]
+        if ch == "(":
+            depth += 1
+            if depth > 1:
+                cur += ch
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                args.append(cur)
+                return args, k + 1
+            cur += ch
+        elif ch == "," and depth == 1:
+            args.append(cur)
+            cur = ""
+        else:
+            cur += ch
+        k += 1
+    return None, j
+
+
+def _expand(s, objs, funcs, blocked=frozenset(), depth=0):
+    """Expand #define macros (object-like and function-like, with ## pasting), like the C preprocessor."""
+    if depth > 40:
+        return s
+    out, pos = [], 0
+    for m in re.finditer(r"[A-Za-z_]\w*", s):
+        if m.start() < pos:
+            continue
+        name = m.group(0)
+        if name in blocked:
+            continue
+        if name in funcs:
+            j = m.end()
+            while j < len(s) and s[j] in " \t":
+                j += 1
+            if j < len(s) and s[j] == "(":
+                args, end = _call_args(s, j)
+                if args is not None:
+                    params, body = funcs[name]
+                    mp = {p: a.strip() for p, a in zip(params, args)}
+                    body = re.sub(r"[A-Za-z_]\w*", lambda mm: mp.get(mm.group(0), mm.group(0)), body)
+                    body = re.sub(r"\s*##\s*", "", body)
+                    out += [s[pos:m.start()], _expand(body, objs, funcs, blocked | {name}, depth + 1)]
+                    pos = end
+        elif name in objs:
+            out += [s[pos:m.start()], _expand(objs[name], objs, funcs, blocked | {name}, depth + 1)]
+            pos = m.end()
+    out.append(s[pos:])
+    return "".join(out)
+
+
+def preprocess(t):
+    """Resolve #define macros so that `G_A`, `COMBO(...)` or `TYPING_LAYERS` become what they stand for.
+    -> (expanded text, {macro: plain number}, set of macros that expand to a whole binding)"""
+    t = re.sub(r"\\[ \t]*\n", " ", t)
+    objs, funcs, keep = {}, {}, []
+    for line in t.split("\n"):
+        m = re.match(r"\s*#\s*define\s+(\w+)(\(([^)]*)\))?[ \t]*(.*)$", line)
+        if m:
+            body = m.group(4).replace(SPLIT_MARK, " ").strip()
+            if m.group(3) is not None:
+                funcs[m.group(1)] = ([p.strip() for p in m.group(3).split(",") if p.strip()], body)
+            else:
+                objs[m.group(1)] = body
+            keep.append("")
+        elif re.match(r"\s*#\s*(include|if|ifdef|ifndef|else|elif|endif|undef|pragma)\b", line):
+            keep.append("")
+        else:
+            keep.append(line)
+    parts = re.split(r'("[^"\n]*")', "\n".join(keep))          # never touch text inside quotes
+    text = "".join(p if i % 2 else _expand(p, objs, funcs) for i, p in enumerate(parts))
+    numbers, starts = {}, set()
+    for name, body in objs.items():
+        v = _expand(body, objs, funcs, frozenset({name})).strip()
+        if re.fullmatch(r"-?\d+", v):
+            numbers[name] = int(v)
+        if v.startswith("&"):
+            starts.add(name)
+    return text, numbers, starts
+
+
 def parse_nodes(body):
     """Return [(header, inner_body)] for the child nodes found at depth 0 of `body`."""
     out, i, n = [], 0, len(body)
@@ -104,6 +200,10 @@ def find_node(nodes, name):
     return None
 
 
+BINDING_STARTS = set()          # macro names that stand for a whole binding (set while parsing)
+ROW_LEFTS = None                # keys on the left half of each row, when the file shows where the split is
+
+
 def split_bindings(line):
     """'&kp Q &mo 1 &kp LG(Z)' -> ['&kp Q', '&mo 1', '&kp LG(Z)']"""
     merged, buf = [], ""
@@ -116,11 +216,25 @@ def split_bindings(line):
         merged.append(buf)
     out = []
     for tok in merged:
-        if tok.startswith("&") or not out:
+        if tok.startswith("&") or tok in BINDING_STARTS or not out:
             out.append(tok)
         else:
             out[-1] += " " + tok
     return out
+
+
+def split_marked(line):
+    """A line of bindings -> (bindings, number of keys left of the split marker or None)."""
+    groups = [split_bindings(g.strip()) for g in line.split(SPLIT_MARK)]
+    groups = [g for g in groups if g]
+    toks = [b for g in groups for b in g]
+    if len(groups) < 2:
+        return toks, None
+    cuts, n = [], 0
+    for g in groups[:-1]:
+        n += len(g)
+        cuts.append(n)
+    return toks, min(cuts, key=lambda k: abs(k - len(toks) / 2))
 
 
 def guess_rows(total):
@@ -131,33 +245,62 @@ def guess_rows(total):
     return [total]
 
 
+BEH = {}        # behaviours defined in the file: label -> {"compat", "bindings", "mode"}
+
+
+def parse_behaviors(root):
+    BEH.clear()
+
+    def walk(nodes):
+        for header, body in nodes:
+            comp = re.search(r'compatible\s*=\s*"([^"]*)"', body)
+            if comp and "behavior" in comp.group(1) and ":" in header:
+                bd = re.search(r"\bbindings\s*=\s*([^;]*);", body)
+                mode = re.search(r'toggle-mode\s*=\s*"([^"]*)"', body)
+                BEH[header.split(":")[0].strip()] = {
+                    "compat": comp.group(1),
+                    "bindings": re.findall(r"&(\w+)", bd.group(1)) if bd else [],
+                    "mode": mode.group(1) if mode else "toggle"}
+            walk(parse_nodes(body))
+    walk(root)
+
+
 def parse_keymap(text, forced_rows=None):
-    clean = strip_comments(text)
-    defines = {m.group(1): int(m.group(2))
-               for m in re.finditer(r"^\s*#define\s+(\w+)\s+(\d+)\s*$", clean, re.M)}
+    global BINDING_STARTS, ROW_LEFTS
+    clean, defines, BINDING_STARTS = preprocess(strip_comments_marked(text))
     root = parse_nodes(clean)
+    parse_behaviors(root)
     keymap_body = find_node(root, "keymap")
     if keymap_body is None:
         sys.exit("error: no `keymap { ... }` node found in the file")
 
-    layers = []
+    layers, lefts0 = [], None
     for header, body in parse_nodes(keymap_body):
         m = re.search(r"\bbindings\s*=\s*<(.*?)>\s*;", body, re.S)
         if not m:
             continue
         name = header.split(":")[-1].strip()
         dn = re.search(r'(?:display-name|label)\s*=\s*"([^"]*)"', body)
-        lines = [split_bindings(l) for l in m.group(1).splitlines() if l.strip()]
+        parsed = [split_marked(l) for l in m.group(1).splitlines() if l.replace(SPLIT_MARK, "").strip()]
+        lines = [p[0] for p in parsed]
+        if not layers:
+            lefts0 = [p[1] for p in parsed]
         layers.append({"idx": len(layers), "name": name, "title": dn.group(1) if dn else name,
                        "lines": lines, "flat": [b for l in lines for b in l]})
     if not layers:
         sys.exit("error: no layers with `bindings = < ... >;` found")
+    if len(layers) > 1 and all(re.search(r"[_-]layer$", L["name"]) for L in layers):
+        for L in layers:                                  # "macro_layer" -> "macro": shorter, easier to read
+            L["name"] = re.sub(r"[_-]layer$", "", L["name"])
 
+    ROW_LEFTS = None
     if forced_rows:
         row_lens = forced_rows
     else:
         first = [len(l) for l in layers[0]["lines"]]
         row_lens = first if len(first) > 1 else guess_rows(len(layers[0]["flat"]))
+        if len(first) > 1 and lefts0 and any(k is not None for k in lefts0):
+            ROW_LEFTS = [k if k is not None else n // 2 for k, n in zip(lefts0, row_lens)]
     total = sum(row_lens)
     for L in layers:
         flat = L["flat"]
@@ -171,16 +314,18 @@ def parse_keymap(text, forced_rows=None):
     combos = []
     combos_body = find_node(root, "combos")
     for header, body in (parse_nodes(combos_body) if combos_body else []):
+        body = body.replace(SPLIT_MARK, " ")
         kp = re.search(r"key-positions\s*=\s*<([^>]*)>", body)
         bd = re.search(r"\bbindings\s*=\s*<([^>]*)>", body)
         if not (kp and bd):
             continue
         ly = re.search(r"\blayers\s*=\s*<([^>]*)>", body)
         to = re.search(r"timeout-ms\s*=\s*<(\d+)>", body)
-        combos.append({"name": header.split(":")[-1].strip(),
+        nm = header.split(":")[-1].strip()
+        combos.append({"name": nm[6:] if nm.startswith("combo_") else nm,
                        "positions": [int(x) for x in re.findall(r"\d+", kp.group(1))],
                        "binding": " ".join(bd.group(1).split()),
-                       "layers": [int(x) for x in re.findall(r"\d+", ly.group(1))] if ly else None,
+                       "layers": [int(x) for x in re.findall(r"-?\d+", ly.group(1)) if int(x) >= 0] if ly else None,
                        "timeout": int(to.group(1)) if to else None})
     return layers, combos, row_lens, defines
 
@@ -206,12 +351,16 @@ KP = {
     "HOME": "Home", "END": "End", "PG_UP": "PgUp", "PG_DN": "PgDn", "INSERT": "Ins",
     "PRINTSCREEN": "PrtSc", "K_APP": "Menu",
     "LSHIFT": "Shift", "LEFT_SHIFT": "Shift", "RSHIFT": "RShift", "RIGHT_SHIFT": "RShift",
-    "LCTRL": "Ctrl", "LEFT_CONTROL": "Ctrl", "RCTRL": "RCtrl", "RIGHT_CONTROL": "RCtrl",
+    "LSHFT": "Shift", "RSHFT": "RShift", "LSFT": "Shift", "RSFT": "RShift", "LCTL": "Ctrl", "RCTL": "RCtrl",
+    "LWIN": "Win", "RWIN": "RWin", "LCMD": "Cmd", "RCMD": "RCmd", "LCTRL": "Ctrl", "LEFT_CONTROL": "Ctrl", "RCTRL": "RCtrl", "RIGHT_CONTROL": "RCtrl",
     "LALT": "Alt", "LEFT_ALT": "Alt", "RALT": "RAlt", "RIGHT_ALT": "RAlt",
     "LGUI": "GUI", "LEFT_GUI": "GUI", "LEFT_WIN": "Win", "LEFT_COMMAND": "Cmd",
     "RGUI": "RGUI", "RIGHT_GUI": "RGUI", "RIGHT_WIN": "RWin", "RIGHT_COMMAND": "RCmd",
     "KP_DIVIDE": "KP /", "KP_MULTIPLY": "KP *", "KP_MINUS": "KP -", "KP_SUBTRACT": "KP -",
     "KP_PLUS": "KP +", "KP_ENTER": "KP Enter", "KP_DOT": "KP .", "KP_EQUAL": "KP =",
+    "K_PP": "Play/Pause", "K_PLAY_PAUSE": "Play/Pause", "K_NEXT": "Next", "K_PREVIOUS": "Prev",
+    "K_MUTE": ICON_MUTE, "K_VOL_UP": ICON_VOL_UP, "K_VOLUME_UP": ICON_VOL_UP,
+    "K_VOL_DN": ICON_VOL_DN, "K_VOLUME_DOWN": ICON_VOL_DN, "C_BRI_UP": ICON_BR_UP, "C_BRI_DN": ICON_BR_DN,
     "C_NEXT": "Next", "C_PREVIOUS": "Prev", "C_PLAY_PAUSE": "Play/Pause", "C_PP": "Play/Pause",
     "C_MUTE": ICON_MUTE, "MUTE": ICON_MUTE,
     "C_VOLUME_UP": ICON_VOL_UP, "C_VOL_UP": ICON_VOL_UP, "VOL_UP": ICON_VOL_UP,
@@ -228,8 +377,15 @@ MKP = {"MB1": "Btn 1", "MB2": "Btn 2", "MB3": "Btn 3", "MB4": "Btn 4", "MB5": "B
        "LCLK": "Left Click", "RCLK": "Right Click", "MCLK": "Mid Click"}
 
 
+SHIFTED = {"N1": "!", "N2": "@", "N3": "#", "N4": "$", "N5": "%", "N6": "^", "N7": "&", "N8": "*",
+           "N9": "(", "N0": ")", "MINUS": "_", "EQUAL": "+", "SEMI": ":", "SQT": '"', "COMMA": "<",
+           "DOT": ">", "FSLH": "?", "LBKT": "{", "RBKT": "}", "BSLH": "|", "GRAVE": "~"}
+
+
 def kp_label(code):
     m = re.fullmatch(r"([LR])([SCAG])\((.+)\)", code)
+    if m and m.group(2) == "S" and m.group(3) in SHIFTED:
+        return SHIFTED[m.group(3)]                  # LS(N9) is just "("
     if m:
         return ("R" if m.group(1) == "R" else "") + MODFN[m.group(2)] + "+" + kp_label(m.group(3))
     if code in KP:
@@ -284,6 +440,10 @@ def label(binding):
             return "Move " + ARROW.get(arg[0].split("_")[-1], arg[0]), raw
         if beh == "mkp":
             return MKP.get(arg[0], arg[0]), raw
+        if beh == "out":
+            return {"OUT_USB": "USB", "OUT_BLE": "BLE", "OUT_TOG": "USB/BLE"}.get(arg[0], arg[0]), raw
+        if beh in BEH and "toggle-layer" in BEH[beh]["compat"]:
+            return ("Layer off" if BEH[beh]["mode"] == "off" else "Layer on") + f" L{arg[0]}", raw
         if beh == "caps_word":
             return "CapsWord", raw
         if beh == "key_repeat":
@@ -295,21 +455,49 @@ def label(binding):
     return beh, raw
 
 
-LAYER_BEH = {"mo": "hold", "tog": "toggle", "to": "switch", "sl": "oneshot", "lt": "taphold"}
+LAYER_BEH = {"mo": "hold", "tog": "toggle", "to": "switch", "sl": "oneshot"}
 KIND_TEXT = {"hold": "hold", "toggle": "toggle", "switch": "switch to", "oneshot": "one-shot",
-             "taphold": "hold (tap-hold)"}
+             "taphold": "hold (tap-hold)", "off": "turn off"}
 HELD_KINDS = ("hold", "taphold")
+
+
+def holdtap(beh):
+    """A hold-tap behaviour -> (behaviour used on hold, behaviour used on tap), else None."""
+    if beh == "lt":
+        return "mo", "kp"
+    if beh == "mt":
+        return "kp", "kp"
+    b = BEH.get(beh)
+    if b and "hold-tap" in b["compat"] and len(b["bindings"]) >= 2:
+        return b["bindings"][0], b["bindings"][1]
+    return None
+
+
+def is_toggle_key(binding):
+    beh = binding.split()[0].lstrip("&")
+    return beh == "tog" or (beh in BEH and "toggle-layer" in BEH[beh]["compat"])
 
 
 def layer_action(binding, defines):
     """-> (kind, target layer) or None"""
     p = binding.split()
     beh = p[0].lstrip("&")
-    if beh not in LAYER_BEH or len(p) < 2:
+    if len(p) < 2:
         return None
     tok = p[1]
     tgt = int(tok) if tok.isdigit() else defines.get(tok)
-    return (LAYER_BEH[beh], tgt) if tgt is not None else None
+    if tgt is None:
+        return None
+    ht = holdtap(beh)
+    if ht:                                           # a layer-tap: tap = key, hold = layer
+        if ht[0] not in LAYER_BEH:
+            return None
+        return ("taphold" if ht[0] == "mo" else LAYER_BEH[ht[0]]), tgt
+    if beh in BEH and "toggle-layer" in BEH[beh]["compat"]:
+        return ("off" if BEH[beh]["mode"] == "off" else "toggle"), tgt
+    if beh in LAYER_BEH:
+        return LAYER_BEH[beh], tgt
+    return None
 
 
 # --------------------------------------------------------------------------- graph
@@ -326,12 +514,16 @@ def build_edges(layers, combos, defines):
             if dst == L["idx"]:
                 self_toggles[L["idx"]].append(pos)
                 continue
+            if kind == "off":                         # turning another layer off is no way to get anywhere
+                continue
             grouped.setdefault((L["idx"], dst, kind, "key", ""), []).append(pos)
     for c in combos:
         act = layer_action(c["binding"], defines)
         if not act or not (0 <= act[1] < n):
             continue
         kind, dst = act
+        if kind == "off":
+            continue
         # a combo may name a key that this board does not have: skip the ones that
         # are not there, and skip the combo entirely when none of them are
         pos = [p for p in c["positions"] if 0 <= p < nkeys]
@@ -648,7 +840,7 @@ TH = dict(bg="#181818", card="#222222", key="#474747", keytext="#ffffff", ksub="
           sub="#bdbdbd")
 PALETTE = ["#4c9eff", "#3ecf8e", "#b388ff", "#ffb74d", "#26c6da", "#ff6b6b", "#d4e157", "#8d9bff"]
 INV_W = 0.5                    # cost of moving a layer out of numeric order (a crossing costs 10)
-KIND_WORD = {"hold": "hold", "toggle": "toggle", "switch": "go to", "oneshot": "1-shot", "taphold": "hold"}
+KIND_WORD = {"off": "off", "hold": "hold", "toggle": "toggle", "switch": "go to", "oneshot": "1-shot", "taphold": "hold"}
 SIZES = [36 - 0.5 * i for i in range(56)]          # label font sizes tried, biggest first (36 .. 8.5)
 
 
@@ -664,14 +856,17 @@ def describe(b, layers, defines):
     if beh in ("trans", "none"):
         return beh, "", False, False
     act = layer_action(b, defines)
+    ht = holdtap(beh)
     if act:
         kind, tgt = act
         name = layers[tgt]["name"] if 0 <= tgt < len(layers) else f"L{tgt}"
-        if beh == "lt":
-            return (kp_label(p[2]) if len(p) > 2 else ""), name, False, True
-        return name, {"hold": "", "toggle": "toggle", "switch": "go to", "oneshot": "1-shot"}[kind], True, False
-    if beh == "mt" and len(p) > 2:
-        return kp_label(p[2]), kp_label(p[1]), False, False
+        if kind == "taphold":                         # tap = the key, hold = the layer
+            tap = label(f"&{ht[1]} {p[2]}")[0] if len(p) > 2 else ""
+            return tap, name, False, True
+        return name, {"hold": "", "toggle": "toggle", "switch": "go to", "oneshot": "1-shot",
+                      "off": "turn off"}[kind], True, False
+    if ht and len(p) > 2:                             # a mod-tap: tap = the key, hold = the modifier
+        return label(f"&{ht[1]} {p[2]}")[0], label(f"&{ht[0]} {p[1]}")[0], False, False
     return label(b)[0], "", False, False
 
 
@@ -743,9 +938,9 @@ def draw_key(c, x, y, ks, b, layers, defines, th, state=None, part="both"):
         c.media_icon(cx, y + ks / 2, sz, main, tc, bg=fill)
         return
     if main:
-        lines, size = wrap(main, ks - 10, ks - (40 if sub else 14))
+        lines, size = wrap(main, ks - 10, ks - (56 if sub else 14))
         lh = size * 1.12
-        top = y + ks / 2 - len(lines) * lh / 2 - (8 if sub else 0)
+        top = y + ks / 2 - len(lines) * lh / 2 - (16 if sub else 0)
         for i, ln in enumerate(lines):
             base = top + (i + 0.82) * lh
             c.text(cx, base, ln, size, tc, anchor="middle")
@@ -753,8 +948,8 @@ def draw_key(c, x, y, ks, b, layers, defines, th, state=None, part="both"):
                 w = tw(ln, size)
                 c.line(cx - w / 2, base + 2.6, cx + w / 2, base + 2.6, tc, 1.5)
     if sub:
-        sl, ss = wrap(sub, ks - 10, 18, [17, 16.5, 16, 15.5, 15, 14.5, 14, 13.5, 13, 12, 11, 10, 9, 8])
-        base = y + ks - 10
+        sl, ss = wrap(sub, ks - 10, 26, [24, 23, 22, 21, 20, 19, 18, 17, 16.5, 16, 15.5, 15, 14.5, 14, 13.5, 13, 12, 11, 10, 9, 8])
+        base = y + ks - 26                    # raised, so the combo squares do not cover it
         sc = (th["presstext"] if state == "layer" else th["heldtext"] if state == "held"
               else th["togletext"] if state == "toggle" else th["ksub"])
         c.text(cx, base, sl[0], ss, sc, anchor="middle")
@@ -769,10 +964,12 @@ class Board:
 
     def __init__(self, row_lens, ks, gap, split):
         self.ks, self.gap, self.split = ks, gap, split
-        M = max(max(n // 2, n - n // 2) for n in row_lens)
+        lefts = [(ROW_LEFTS[r] if ROW_LEFTS and len(ROW_LEFTS) == len(row_lens) else n // 2)
+                 for r, n in enumerate(row_lens)]
+        M = max(max(lf, n - lf) for lf, n in zip(lefts, row_lens))
         self.cells = []
         for r, n in enumerate(row_lens):
-            left = n // 2
+            left = lefts[r]
             for i in range(n):
                 slot = (M - left + i) if i < left else (M + i - left)
                 self.cells.append((slot * (ks + gap) + (split if i >= left else 0), r * (ks + gap)))
@@ -859,7 +1056,7 @@ def arrow_head(c, x, y, d, color, size=22):
         c.poly([(x, y), (x - size * 0.60, y + size), (x + size * 0.60, y + size)], color, 1, closed=True, fill=color)
 
 
-def draw_legend(c, x, y, th):
+def draw_legend(c, x, y, th, chips=False):
     """Small 'how to read' panel."""
     items = [("pink", "pink key  =  press it to go to another layer"),
              ("violet", "violet key  =  press it to toggle a layer on and off"),
@@ -868,6 +1065,8 @@ def draw_legend(c, x, y, th):
              ("dash", "dashed arrow  =  toggle / go to / one-shot"),
              ("combo", "combo  =  press the red keys together"),
              ("colour", "arrow colour  =  the layer it leads to")]
+    if chips:
+        items.insert(6, ("chip", "blue key between keys  =  combo of those keys"))
     w, rh = 660, 58
     h = 100 + rh * len(items)
     c.rect(x, y, w, h, fill="#1d1d1d", stroke="#343434", sw=2, r=22)
@@ -889,6 +1088,8 @@ def draw_legend(c, x, y, th):
         elif kind == "colour":
             for k, col in enumerate(("#4c9eff", "#7fb4ff", "#a9c9ff")):
                 c.rect(x + 32 + k * 26, yy - 22, 22, 22, fill=col, r=5)
+        elif kind == "chip":
+            c.rect(x + 28, yy - 28, 42, 32, fill=th["blue"], r=10)
         else:
             c.text(x + 32, yy, "combo", 25, th["pink"])
         c.text(x + 128, yy, txt, 25, th["sub"])
@@ -945,6 +1146,12 @@ def shade(hexc, f):
 
 def flow_page(layers, combos, row_lens, defines, src_name):
     th = TH
+    # combos that type a key sit between the keys on the layers they work on; only the combos that
+    # change layer are drawn as arrows (and listed at the bottom)
+    all_combos = combos
+    kcombos = [cb for cb in combos if not layer_action(cb["binding"], defines)
+               and describe(cb["binding"], layers, defines)[0] not in ("trans", "none")]
+    combos = [cb for cb in combos if layer_action(cb["binding"], defines)]
     edges, self_toggles = build_edges(layers, combos, defines)
     depth, prev = bfs(len(layers), edges)
     # "&tog N" on layer N switches back to the layer you came from, so it is drawn as
@@ -968,7 +1175,9 @@ def flow_page(layers, combos, row_lens, defines, src_name):
         es.sort(key=lambda e: (e["src"], e["via"], e["positions"][0] if e["positions"] else 0))
         for k, e in enumerate(es):
             acolor[e["id"]] = shade(layer_color(j), FACTS[k % len(FACTS)])
-    KS, GAP, SPLIT = 118, 10, 56
+    last_row_start = sum(row_lens[:-1])
+    needs_gap = any(p < last_row_start for e in edges for p in e["positions"])
+    KS, GAP, SPLIT = 150, (10 if kcombos else 20 if needs_gap else 15), 60
     board, mini = Board(row_lens, KS, GAP, SPLIT), Board(row_lens, 26, 5, 30)
     PAD, HD, PADB = 28, 118, 34
     nw = board.w + 2 * PAD
@@ -1355,25 +1564,19 @@ def flow_page(layers, combos, row_lens, defines, src_name):
                 lfree = side_free(cells[ti], True)
                 rfree = side_free(cells[ti], False)
                 if lfree and not rfree:
-                    ex, mx = left, cx0 + 16
-                elif rfree and not lfree:
-                    ex, mx = right, cx0 + nw - 16 - side_n[e["id"]] * 26
-                else:
-                    # neither side is free: the line has to pass over the keys of this
-                    # row - take the side where it passes over the fewest of them
-                    def keys_between(lo, hi):
-                        n = 0
-                        for bx, by in board.cells:
-                            if by != cells[ti][1]:
-                                continue
-                            if bx >= lo and bx < hi:
-                                n += 1
-                        return n
-                    if keys_between(cx0, left) <= keys_between(right, cx0 + nw):
-                        ex, mx = left, cx0 + 16
-                    else:
-                        ex, mx = right, cx0 + nw - 16 - side_n[e["id"]] * 26
-                return ex, t[3], mx
+                    return left, t[3], cx0 + 16, None
+                if rfree and not lfree:
+                    return right, t[3], cx0 + nw - 16 - side_n[e["id"]] * 26, None
+                if lfree and rfree:
+                    if left - cx0 <= cx0 + nw - right:
+                        return left, t[3], cx0 + 16, None
+                    return right, t[3], cx0 + nw - 16 - side_n[e["id"]] * 26, None
+                # keys on both sides and below: the line drops into the gap under the key's
+                # row, runs along the gap and leaves the card - it never crosses a key
+                kx = t[0] + keyoff.get(((e["src"], round(t[0])), e["id"]), 0.0)
+                if kx - cx0 <= cx0 + nw - kx:
+                    return kx, t[3], cx0 + 16, t[1] + GAP / 2
+                return kx, t[3], cx0 + nw - 16 - side_n[e["id"]] * 26, t[1] + GAP / 2
 
             if anchor_leg[e["id"]] == "down":
                 # the line starts on the key and goes straight down
@@ -1386,12 +1589,16 @@ def flow_page(layers, combos, row_lens, defines, src_name):
                 # there is a key below the trigger, so the line leaves it on the side of
                 # the card that is closest to it and runs down the margin of the card,
                 # so that it does not cross the keyboard
-                ex, sy, mx = exit_side(ai)
-                sx = ex
-                pts = [(sx, sy), (mx, sy), (mx, gy)]
-                start = (sx, sy)
+                ex, sy, mx, via = exit_side(ai)
+                if via is None:
+                    pts = [(ex, sy), (mx, sy), (mx, gy)]
+                    start = (ex, sy)
+                    dots = [(ex, sy)]
+                else:
+                    start = (ex, a[1])
+                    pts = [start, (ex, via), (mx, via), (mx, gy)]
+                    dots = [start]
                 dx = mx
-                dots = [(sx, sy)]
                 jx = mx
             # the other keys of a combo join this line, like a circuit
             for ti, t in enumerate(trig):
@@ -1406,9 +1613,13 @@ def flow_page(layers, combos, row_lens, defines, src_name):
                 else:
                     # a key is in the way below: this one leaves sideways and joins
                     # the line of the anchor below the layer as well
-                    ex, sy, mx2 = exit_side(ti)
-                    joins.append([(ex, sy), (mx2, sy), (mx2, jy), (jx, jy)])
-                    dots.append((ex, sy))
+                    ex, sy, mx2, via2 = exit_side(ti)
+                    if via2 is None:
+                        joins.append([(ex, sy), (mx2, sy), (mx2, jy), (jx, jy)])
+                        dots.append((ex, sy))
+                    else:
+                        joins.append([(ex, t[1]), (ex, via2), (mx2, via2), (mx2, jy), (jx, jy)])
+                        dots.append((ex, t[1]))
 
             if m == "fwd":
                 lx = lane[("fwd", e["id"])]
@@ -1519,10 +1730,10 @@ def flow_page(layers, combos, row_lens, defines, src_name):
     c = Canvas(PW, PH, bg=th["bg"])
 
     c.text(PM, PM + 56, src_name, 58, th["title"])
-    c.text(PM, PM + 100, f"{len(layers)} layers   ·   {sum(row_lens)} keys   ·   {len(combos)} combos", 26, th["sub"])
+    c.text(PM, PM + 100, f"{len(layers)} layers   ·   {sum(row_lens)} keys   ·   {len(all_combos)} combos", 26, th["sub"])
     c.text(PM, PM + 136, "every arrow starts on the key that triggers it", 22, th["dim"])
     c.rect(PM, PM + 162, 190, 5, fill=layer_color(1), r=3)
-    draw_legend(c, PW - PM - 660, PM - 6, th)
+    draw_legend(c, PW - PM - 660, PM - 6, th, bool(kcombos))
 
     # ---- 1. a soft band behind every column, so the layers are grouped
     for c_ in range(ncols):
@@ -1559,7 +1770,7 @@ def flow_page(layers, combos, row_lens, defines, src_name):
         if k in held_by[L["idx"]]:
             return "held"
         b = L["flat"][k]
-        if b.split()[0].lstrip("&") == "tog":
+        if is_toggle_key(b) and layer_action(b, defines):
             return "toggle"
         return "layer" if layer_action(b, defines) else None
 
@@ -1601,6 +1812,23 @@ def flow_page(layers, combos, row_lens, defines, src_name):
         for k in range(len(board.cells)):
             x, y = kpos(L["idx"], k)
             draw_key(c, x, y, KS, L["flat"][k], layers, defines, th, kstate(L, k), part="text")
+
+    # ---- 5b. combos that type a key: a small blue key between the keys that make the combo
+    for L in layers:
+        i = L["idx"]
+        for cb in kcombos:
+            if cb["layers"] is not None and i not in cb["layers"]:
+                continue
+            ps = [p for p in cb["positions"] if p < len(board.cells)]
+            if not ps:
+                continue
+            pts = [kpos(i, p) for p in ps]
+            cx = sum(p[0] for p in pts) / len(pts) + KS / 2
+            cy = sum(p[1] for p in pts) / len(pts) + KS / 2
+            main = describe(cb["binding"], layers, defines)[0]
+            w, h = max(68, tw(main, 32) + 28), 46
+            c.rect(cx - w / 2, cy - h / 2, w, h, fill=th["blue"], stroke=th["card"], sw=5, r=15)
+            c.text(cx, cy + 11, main, 31, th["bluetext"], anchor="middle")
 
     # ---- 6. arrow labels, last so that no line crosses them
     lbl_boxes = []
@@ -1660,10 +1888,12 @@ def flow_page(layers, combos, row_lens, defines, src_name):
 # --------------------------------------------------------------------------- page 2: keymap text
 def align_rows(rows):
     """Rows of bindings -> aligned text lines (same grid as the keyboard halves)."""
-    M = max(max(len(r) // 2, len(r) - len(r) // 2) for r in rows)
+    lefts = [(ROW_LEFTS[k] if ROW_LEFTS and len(ROW_LEFTS) == len(rows) else len(r) // 2)
+             for k, r in enumerate(rows)]
+    M = max(max(lf, len(r) - lf) for lf, r in zip(lefts, rows))
     grid = []
-    for r in rows:
-        left = len(r) // 2
+    for k, r in enumerate(rows):
+        left = lefts[k]
         cells = [""] * (2 * M)
         for i, b in enumerate(r):
             cells[(M - left + i) if i < left else (M + i - left)] = b
