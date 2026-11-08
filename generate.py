@@ -1737,9 +1737,14 @@ def flow_page(layers, combos, row_lens, defines, src_name):
 
     # ---- 1. a soft band behind every column, so the layers are grouped
     for c_ in range(ncols):
-        ct = min(ypos[i] for i in cols[c_])
-        cb = max(ypos[i] + nh[i] for i in cols[c_])
-        c.rect(XCOL[c_] - 26, ct - 34, nw + 52, cb - ct + 68, fill="#1c1c1c", r=30)
+        groups = []                         # layers that are far apart get a band each, not one long band
+        for i in sorted(cols[c_], key=lambda i: ypos[i]):
+            if groups and ypos[i] - groups[-1][1] <= 2 * VGAP:
+                groups[-1][1] = ypos[i] + nh[i]
+            else:
+                groups.append([ypos[i], ypos[i] + nh[i]])
+        for ct, cb in groups:
+            c.rect(XCOL[c_] - 26, ct - 34, nw + 52, cb - ct + 68, fill="#1c1c1c", r=30)
 
     # ---- 2. layer cards
     for L in layers:
