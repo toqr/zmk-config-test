@@ -245,6 +245,7 @@ def guess_rows(total):
     return [total]
 
 
+CONDITIONAL = []   # conditional layers: [{"name", "ifs": [layers], "then": layer}]
 BEH = {}        # behaviours defined in the file: label -> {"compat", "bindings", "mode"}
 
 
@@ -260,6 +261,7 @@ def parse_behaviors(root):
                 BEH[header.split(":")[0].strip()] = {
                     "compat": comp.group(1),
                     "bindings": re.findall(r"&(\w+)", bd.group(1)) if bd else [],
+                    "raw": [x.strip() for x in re.findall(r"<([^>]*)>", bd.group(1))] if bd else [],
                     "mode": mode.group(1) if mode else "toggle"}
             walk(parse_nodes(body))
     walk(root)
@@ -327,6 +329,15 @@ def parse_keymap(text, forced_rows=None):
                        "binding": " ".join(bd.group(1).split()),
                        "layers": [int(x) for x in re.findall(r"-?\d+", ly.group(1)) if int(x) >= 0] if ly else None,
                        "timeout": int(to.group(1)) if to else None})
+    CONDITIONAL.clear()
+    cl_body = find_node(root, "conditional_layers")
+    for header, body in (parse_nodes(cl_body) if cl_body else []):
+        ifs = re.search(r"if-layers\s*=\s*<([^>]*)>", body)
+        then = re.search(r"then-layer\s*=\s*<\s*(\d+)\s*>", body)
+        if ifs and then:
+            CONDITIONAL.append({"name": header.split(":")[-1].strip(),
+                                "ifs": [int(x) for x in re.findall(r"\d+", ifs.group(1))],
+                                "then": int(then.group(1))})
     return layers, combos, row_lens, defines
 
 
@@ -538,6 +549,16 @@ def build_edges(layers, combos, defines):
     for (src, dst, kind, via, name), pos in grouped.items():
         edges.append({"id": f"e{len(edges)}", "src": src, "dst": dst, "kind": kind,
                       "via": via, "name": name, "positions": pos})
+    # conditional layers: when all the `if-layers` are on, the `then-layer` turns on by itself.
+    # No key is involved, so these arrows start on the name plate of the layer (position nkeys)
+    for cl in CONDITIONAL:
+        ifs = [i for i in cl["ifs"] if 0 <= i < n]
+        if not (0 <= cl["then"] < n) or len(ifs) < 2:
+            continue
+        for src in ifs:
+            if src != cl["then"]:
+                edges.append({"id": f"e{len(edges)}", "src": src, "dst": cl["then"], "kind": "cond",
+                              "via": "cond", "name": "+".join(str(i) for i in ifs), "positions": [nkeys]})
     return edges, self_toggles
 
 
@@ -551,6 +572,18 @@ def bfs(n, edges):
                 depth[e["dst"]] = depth[u] + 1
                 prev[e["dst"]] = e
                 q.append(e["dst"])
+    for _ in range(n):                  # a conditional layer sits after all the layers it needs
+        moved = False
+        for e in edges:
+            if e["kind"] == "cond" and e["dst"] in depth and e["src"] in depth \
+                    and depth[e["dst"]] <= depth[e["src"]]:
+                depth[e["dst"]] = depth[e["src"]] + 1
+                moved = True
+                for e2 in edges:        # and whatever is reached through it moves along
+                    if prev.get(e2["dst"]) is e2 and e2["src"] == e["dst"] and depth[e2["dst"]] <= depth[e2["src"]]:
+                        depth[e2["dst"]] = depth[e2["src"]] + 1
+        if not moved:
+            break
     extra = max(depth.values()) + 1
     for i in range(n):
         depth.setdefault(i, extra)
@@ -840,7 +873,7 @@ TH = dict(bg="#181818", card="#222222", key="#474747", keytext="#ffffff", ksub="
           sub="#bdbdbd")
 PALETTE = ["#4c9eff", "#3ecf8e", "#b388ff", "#ffb74d", "#26c6da", "#ff6b6b", "#d4e157", "#8d9bff"]
 INV_W = 0.5                    # cost of moving a layer out of numeric order (a crossing costs 10)
-KIND_WORD = {"off": "off", "hold": "hold", "toggle": "toggle", "switch": "go to", "oneshot": "1-shot", "taphold": "hold"}
+KIND_WORD = {"cond": "both on", "off": "off", "hold": "hold", "toggle": "toggle", "switch": "go to", "oneshot": "1-shot", "taphold": "hold"}
 SIZES = [36 - 0.5 * i for i in range(56)]          # label font sizes tried, biggest first (36 .. 8.5)
 
 
@@ -865,6 +898,9 @@ def describe(b, layers, defines):
             return tap, name, False, True
         return name, {"hold": "", "toggle": "toggle", "switch": "go to", "oneshot": "1-shot",
                       "off": "turn off"}[kind], True, False
+    mb = BEH.get(beh)
+    if mb and "mod-morph" in mb["compat"] and len(mb["raw"]) >= 2:    # e.g. Backspace, Delete with Shift
+        return label(mb["raw"][0])[0], label(mb["raw"][1])[0], False, False
     if ht and len(p) > 2:                             # a mod-tap: tap = the key, hold = the modifier
         return label(f"&{ht[1]} {p[2]}")[0], label(f"&{ht[0]} {p[1]}")[0], False, False
     return label(b)[0], "", False, False
@@ -1180,6 +1216,11 @@ def flow_page(layers, combos, row_lens, defines, src_name):
     KS, GAP, SPLIT = 150, (10 if kcombos else 20 if needs_gap else 15), 60
     board, mini = Board(row_lens, KS, GAP, SPLIT), Board(row_lens, 26, 5, 30)
     PAD, HD, PADB = 28, 118, 34
+    # arrows of a conditional layer have no key: they start on a pretend key at the right end of
+    # the layer's name plate (index = number of real keys)
+    VIRT = len(board.cells)
+    VCELL = (board.w - KS, -HD / 2 - KS / 2)
+    cell_of = lambda p: VCELL if p == VIRT else board.cells[p]
     nw = board.w + 2 * PAD
     PM, HEAD = 112, 430
     TOP0 = PM + HEAD
@@ -1239,8 +1280,8 @@ def flow_page(layers, combos, row_lens, defines, src_name):
     # ---------- the keys that trigger each arrow (static, does not depend on the layout)
     trig_cells = {}
     for e in edges:
-        ps = [p for p in e["positions"] if p < len(board.cells)]
-        trig_cells[e["id"]] = sorted([board.cells[p] for p in ps], key=lambda cl: cl[0])
+        ps = [p for p in e["positions"] if p <= VIRT]
+        trig_cells[e["id"]] = sorted([cell_of(p) for p in ps], key=lambda cl: cl[0])
 
     def room_below(cl):
         """Is there room straight below this key, or is another key in the way?"""
@@ -1395,8 +1436,8 @@ def flow_page(layers, combos, row_lens, defines, src_name):
         dep = {}
         for e in edges:
             i = e["src"]
-            ps = [p for p in e["positions"] if p < len(board.cells)]
-            cells = [board.cells[p] for p in ps]
+            ps = [p for p in e["positions"] if p <= VIRT]
+            cells = [cell_of(p) for p in ps]
             if anchor_leg[e["id"]] == "down":
                 where = PAD + sum(cl[0] for cl in cells) / len(cells)
             else:
@@ -1436,8 +1477,8 @@ def flow_page(layers, combos, row_lens, defines, src_name):
         # key anchors of every arrow
         info = {}
         for e in edges:
-            ps = [p for p in e["positions"] if p < len(board.cells)]
-            cells = [board.cells[p] for p in ps]
+            ps = [p for p in e["positions"] if p <= VIRT]
+            cells = [cell_of(p) for p in ps]
             kx0 = PAD + min(cl[0] for cl in cells)
             kx1 = PAD + max(cl[0] for cl in cells) + KS
             kyc = sum(cl[1] for cl in cells) / len(cells)
@@ -1553,6 +1594,7 @@ def flow_page(layers, combos, row_lens, defines, src_name):
             a = trig[ai]
             ax = a[0] + keyoff.get(((e["src"], round(a[0])), e["id"]), 0.0)
             jy = join_y.get(e["id"], ypos[e["src"]] + nh[e["src"]] + 18)
+            via = ex = None
 
             def exit_side(ti):
                 """The point where the line leaves trigger ti sideways, and the x of the
@@ -1574,7 +1616,7 @@ def flow_page(layers, combos, row_lens, defines, src_name):
                 # keys on both sides and below: the line drops into the gap under the key's
                 # row, runs along the gap and leaves the card - it never crosses a key
                 kx = t[0] + keyoff.get(((e["src"], round(t[0])), e["id"]), 0.0)
-                if kx - cx0 <= cx0 + nw - kx:
+                if m not in ("fwd", "corr"):          # leave on the side the arrow is heading to
                     return kx, t[3], cx0 + 16, t[1] + GAP / 2
                 return kx, t[3], cx0 + nw - 16 - side_n[e["id"]] * 26, t[1] + GAP / 2
 
@@ -1621,13 +1663,26 @@ def flow_page(layers, combos, row_lens, defines, src_name):
                         joins.append([(ex, t[1]), (ex, via2), (mx2, via2), (mx2, jy), (jx, jy)])
                         dots.append((ex, t[1]))
 
-            if m == "fwd":
+            if m == "fwd" and anchor_leg[e["id"]] == "side" and via is not None and dx > ex \
+                    and e["via"] != "cond" and not joins:
+                # it already left the card on the right, along the row gap: go straight on to
+                # the lane instead of dropping under the layer and coming back up
+                lx = lane[("fwd", e["id"])]
+                pts = [start, (ex, via), (lx, via), (lx, ey)]
+            elif e["via"] == "cond" and m == "fwd":
+                # a conditional layer has no key: the line goes straight out of the name plate
+                lx = lane[("fwd", e["id"])]
+                pts = [dots[0], (lx, dots[0][1]), (lx, ey)]
+            elif m == "fwd":
                 lx = lane[("fwd", e["id"])]
                 pts += [(lx, y0), (lx, ey)]
             elif m == "corr":
                 l1, l2 = lane[("descF", e["id"])], lane[("ascF", e["id"])]
                 cy = corridor[e["id"]]
-                pts += [(l1, y0), (l1, cy), (l2, cy), (l2, ey)]
+                if anchor_leg[e["id"]] == "side" and via is not None and dx > ex and not joins:
+                    pts = [start, (ex, via), (l1, via), (l1, cy), (l2, cy), (l2, ey)]
+                else:
+                    pts += [(l1, y0), (l1, cy), (l2, cy), (l2, ey)]
             elif m == "same":
                 lx = lane[("same", e["id"])]
                 pts += [(lx, y0), (lx, ey)]
@@ -1636,7 +1691,10 @@ def flow_page(layers, combos, row_lens, defines, src_name):
                 if depth[j] == 0:                   # the base layer: come up on its left
                     l2 = XCOL[0] - 62
                 cy = corridor[e["id"]]
-                pts += [(l1, y0), (l1, cy), (l2, cy), (l2, ey)]
+                if anchor_leg[e["id"]] == "side" and via is not None and dx < ex and not joins:
+                    pts = [start, (ex, via), (l1, via), (l1, cy), (l2, cy), (l2, ey)]
+                else:
+                    pts += [(l1, y0), (l1, cy), (l2, cy), (l2, ey)]
 
             # the arrow stops at the frame of the layer it leads to, at the height of
             # its name - it never crosses the frame
@@ -1720,13 +1778,14 @@ def flow_page(layers, combos, row_lens, defines, src_name):
     ncorr = sum(1 for m in emode.values() if m in ("corr", "bwd"))
     CORR = 96 + 96 * max(0, ncorr - 1)
     placed, ch = layout_combos(combos, PW - 2 * PM, mini, layers, defines)
-    oy = bottom + VGAP + CORR                  # where the combos panel starts
+    lowest = max((p[1] for d in R.values() for p in d["pts"]), default=bottom)   # the lowest line drawn
+    oy = max(bottom + VGAP + CORR, lowest + 110)   # where the combos panel starts
     # the page ends just below the lowest thing that is actually drawn: the combos
     # panel, or - when there is none - the corridor lines under the layers
     if combos:
         PH = oy + ch + 76 + PM
     else:
-        PH = bottom + 78 + 96 * max(0, ncorr - 1) + 48 + PM
+        PH = max(bottom + 78 + 96 * max(0, ncorr - 1) + 48 + PM, lowest + 90 + PM)
     c = Canvas(PW, PH, bg=th["bg"])
 
     c.text(PM, PM + 56, src_name, 58, th["title"])
@@ -1852,6 +1911,8 @@ def flow_page(layers, combos, row_lens, defines, src_name):
     for d in R.values():
         e, col = d["e"], d["col"]
         txt = ("combo " if e["via"] == "combo" else "") + KIND_WORD[e["kind"]]
+        if e["via"] == "cond":
+            txt = f"layers {e['name']} on"
         w, h = tw(txt, 24) + 32, 50
         pts = d["pts"]
         cands = []
