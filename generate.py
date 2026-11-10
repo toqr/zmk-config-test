@@ -6,7 +6,7 @@ zmk_visualizer.py - turn a ZMK .keymap or a QMK keymap.c into a 2-page PDF.
     python3 zmk_visualizer.py keymap.c                  # QMK:  writes keymap.pdf
     python3 zmk_visualizer.py keymap.c --split no       # QMK board that is one block of keys (no gap in the middle)
     python3 zmk_visualizer.py my.keymap -o out.pdf --open
-    python3 zmk_visualizer.py my.keymap --rows 10,10,10,4   # only if the key rows can't be detected
+    python3 zmk_visualizer.py my.keymap --2rows 10,10,10,4   # only if the key rows can't be detected
 
 Give ONE file: a ZMK .keymap or a QMK keymap.c. The kind is taken from the file ending (.keymap = ZMK,
 .c = QMK; --format overrides it). The file is looked for in the "config" folder (then in the current
@@ -2314,7 +2314,7 @@ def qmk_expand(s, objs, funcs, blocked=frozenset(), depth=0):
 
 def qmk_defines(t):
     """-> (text without preprocessor lines, object macros, function macros)"""
-    t = re.sub(r"\\[ \t]*\r?\n", " ", t)
+    t = re.sub(r"\\[ \t]*\r?\n", " \x0c ", t)         # \x0c: white space that remembers where the line ended
     objs, funcs, keep = {}, {}, []
     for line in t.split("\n"):
         m = re.match(r"\s*#\s*define\s+(\w+)(\(([^)]*)\))?[ \t]*(.*)$", line)
@@ -2567,6 +2567,26 @@ def qmk_custom_layer_keys(text, layer_ref):
     return out
 
 
+QMK_SPLIT_BOARDS = ("kyria", "corne", "crkbd", "lily58", "sofle", "iris", "totem", "sweep", "ferris", "charybdis",
+                    "cradio", "lotus", "dactyl", "imprint", "cantor", "reviung", "nyquist", "elora", "moonlander",
+                    "ergodox", "bastardkb", "splitkb", "helix", "quefrency", "svalboard")
+_SPLIT_API = re.compile(r"\b(is_keyboard_master|is_keyboard_left|is_keyboard_right|SPLIT_KEYBOARD|SPLIT_HAND_PIN"
+                        r"|SPLIT_TRANSPORT_MIRROR|SPLIT_[A-Z_]{4,}|EE_HANDS|MASTER_LEFT|MASTER_RIGHT)\b")
+
+
+def qmk_split_evidence(text, hint=""):
+    """Is there anything in the file (or in its path) that says this is a split keyboard?
+    -> why, or "" when there is nothing. The layout name is checked elsewhere."""
+    m = _SPLIT_API.search(text)
+    if m:
+        return f"the file uses {m.group(1)}, which only exists on split keyboards"
+    low = (text + "\n" + hint).lower()
+    for b in QMK_SPLIT_BOARDS:
+        if re.search(r"(?<![a-z])" + b + r"(?![a-z])", low):
+            return f"the file or its folder mentions {b}, a split keyboard"
+    return ""
+
+
 def qmk_wants_split(layout_name, row_lens, has_marks):
     """Is this a split keyboard (two halves with a gap) or one block of keys?"""
     n = layout_name.lower()
@@ -2575,13 +2595,13 @@ def qmk_wants_split(layout_name, row_lens, has_marks):
         return True
     if has_marks:
         return True
-    if len(row_lens) >= 3 and all(r % 2 == 0 for r in row_lens) and len(set(row_lens[:-1])) == 1 \
-            and row_lens[-1] < row_lens[-2] and row_lens[0] >= 8:
+    if len(row_lens) >= 3 and all(r % 2 == 0 for r in row_lens) and row_lens[-1] < row_lens[-2] \
+            and row_lens[0] >= 8 and row_lens[0] == row_lens[1]:
         return True
     return False
 
 
-def parse_qmk(text, forced_rows=None, split=None):
+def parse_qmk(text, forced_rows=None, split=None, hint=""):
     """A QMK keymap.c -> (layers, combos, row_lens, defines), like parse_keymap() does for ZMK."""
     global BINDING_STARTS, ROW_LEFTS, MONOBLOCK
     BINDING_STARTS = set()
@@ -2629,6 +2649,17 @@ def parse_qmk(text, forced_rows=None, split=None):
             inner = qmk_expand(inner, objs, funcs)
             toks, breaks, marks = qmk_split_keys(inner)
             name = lm.group(1)
+            if name in funcs:                          # the keymap's own layout macro: use what it expands to
+                full = qmk_expand(expr, objs, funcs)
+                lm2 = re.match(r"\s*(\w+)\s*\(", full)
+                if lm2 and lm2.group(1) not in funcs:
+                    inner2, _ = qmk_inner(full, lm2.end() - 1)
+                    toks2, breaks2, marks2 = qmk_split_keys(inner2.replace("\x0c", "\n"))
+                    if len(toks2) == len(toks):        # key for key (home row mods...): keep the layout as written
+                        toks = toks2
+                    else:                              # it adds keys (50 from 32...): the rows are the macro's own
+                        toks, breaks, marks = toks2, breaks2, marks2
+                    name = lm2.group(1)
         elif expr.startswith("{"):                     # a raw matrix: every inner {...} is a row
             inner = qmk_inner(expr, 0)[0]
             rows_ = [qmk_args(qmk_inner(r, 0)[0]) for r in qmk_args(inner) if r.startswith("{")]
@@ -2672,7 +2703,8 @@ def parse_qmk(text, forced_rows=None, split=None):
     first = [len(l) for l in layers[0]["lines"]]
     layout0, n0 = raw_layers[0]["layout"], len(layers[0]["flat"])
     has_marks = bool(lefts0 and any(k is not None for k in lefts0))
-    name_split = qmk_wants_split(layout0, first, False) and not has_marks
+    split_why = qmk_split_evidence(text, hint) if split is None else ""
+    name_split = (qmk_wants_split(layout0, first, False) or bool(split_why)) and not has_marks
     geo, pair, lefts_geo = qmk_name_geometry(layout0, n0), None, None
     if forced_rows:
         row_lens, QMK_INFO[:] = forced_rows, ["rows given with --rows"]
@@ -2698,7 +2730,12 @@ def parse_qmk(text, forced_rows=None, split=None):
     if geo and split is None:
         is_split = geo[2]
     else:
-        is_split = split if split is not None else qmk_wants_split(layout0, row_lens, has_marks or bool(lefts_geo))
+        is_split = split if split is not None else (qmk_wants_split(layout0, row_lens, has_marks or bool(lefts_geo))
+                                                    or bool(split_why))
+        if is_split and split is None and not has_marks and not geo and not qmk_wants_split(layout0, [], False) \
+                and len(QMK_INFO) > 1:
+            QMK_INFO[1] += "; split because " + (
+                split_why or "all rows have an even number of keys and the last (thumb) row is shorter")
     ROW_LEFTS = None
     MONOBLOCK = not is_split
     if is_split and not forced_rows and lefts_geo:
@@ -2737,15 +2774,36 @@ def parse_qmk(text, forced_rows=None, split=None):
             return base_of(a[0])
         return t
 
-    def position_of(kc):
+    def positions_of(kc):
+        """Every key of the base layer that sends this keycode (the exact key first, else the same tap)."""
         kc = re.sub(r"\s+", "", kc)
-        for i, t in enumerate(base_raw):
-            if t == kc:
-                return i
-        for i, t in enumerate(base_raw):
-            if base_of(t) == base_of(kc):
-                return i
-        return None
+        hits = [i for i, t in enumerate(base_raw) if t == kc]
+        return hits or [i for i, t in enumerate(base_raw) if base_of(t) == base_of(kc)]
+
+    lefts_c = [(ROW_LEFTS[r] if ROW_LEFTS and len(ROW_LEFTS) == len(row_lens) else n_ // 2)
+               for r, n_ in enumerate(row_lens)]
+    M_c = max(max(lf, n_ - lf) for lf, n_ in zip(lefts_c, row_lens))
+    pts = []
+    for r, n_ in enumerate(row_lens):
+        for i in range(n_):
+            pts.append((i if MONOBLOCK else key_slot(r, len(row_lens), i, lefts_c[r], n_, M_c), r))
+
+    def resolve(kcs):
+        """Key positions of a combo. A keycode that is on the base layer twice (a Leader key on each side)
+        is the one next to the other keys of the combo."""
+        cands = [positions_of(k) for k in kcs]
+        if any(not c for c in cands):
+            return None
+        if all(len(c) == 1 for c in cands):
+            return [c[0] for c in cands]
+        from itertools import product
+        best, best_d = None, None
+        for combo in product(*[c[:4] for c in cands]):
+            d = sum(abs(pts[a][0] - pts[b][0]) + 1.5 * abs(pts[a][1] - pts[b][1])
+                    for ai, a in enumerate(combo) for b in combo[ai + 1:])
+            if best_d is None or d < best_d - 1e-9:
+                best, best_d = list(combo), d
+        return best
 
     combos = []
     for m in re.finditer(r"\b(COMBO|COMB)\s*\(", body_text):
@@ -2757,14 +2815,53 @@ def parse_qmk(text, forced_rows=None, split=None):
             name, result, kcs = a[0], a[1], a[2:]
         else:
             continue
-        pos = [position_of(k) for k in kcs]
-        if not pos or any(p is None for p in pos) or len(set(pos)) != len(pos):
+        pos = resolve(kcs)
+        if not pos or len(set(pos)) != len(pos):
             print(f"warning: combo {name}: its keys are not all on the base layer, so it is left out",
                   file=sys.stderr)
             continue
         nm = re.sub(r"^(?:COMBO_|CMB_|C_)", "", name)
         combos.append({"name": nm, "positions": pos, "binding": keys.binding(result),
                        "layers": None, "timeout": None})
+
+    # --- COMBO_ACTION(name): the keys do whatever process_combo_event() does for that event
+    actions = {}
+    pm = re.search(r"\bprocess_combo_event\s*\([^)]*\)\s*\{", body_text)
+    if pm:
+        fbody = qmk_inner(body_text, pm.end() - 1)[0]
+        pending, parts_ = [], re.split(r"(\bcase\s+\w+\s*:|\bdefault\s*:)", fbody)
+        for lab, txt in zip(parts_[1::2], parts_[2::2]):
+            pending.append(re.sub(r"\bcase\s+|\s*:", "", lab))
+            if txt.strip().strip("}").strip():
+                for ev in pending:
+                    actions[ev] = txt
+                pending = []
+
+    def action_text(txt):
+        """What a case of process_combo_event() does, as a few words for the key."""
+        taps = re.findall(r"\b(?:tap_code|register_code)(?:16)?\s*\(\s*([^;]*?)\s*\)\s*;", txt)
+        if taps:
+            return " ".join(keys.text(t) for t in taps)
+        sent = re.findall(r'\bSEND_STRING\s*\(\s*"([^"]*)"', txt)
+        if sent:
+            return "".join(sent)
+        calls = [c for c in re.findall(r"\b([A-Za-z_]\w*)\s*\(", txt)
+                 if c not in ("if", "switch", "while", "for", "return", "sizeof")]
+        words = lambda c: " ".join(w.capitalize() for w in re.sub(r"^(?:toggle|enable)_", "", c).split("_"))
+        return " + ".join(words(c) for c in list(dict.fromkeys(calls))[:2])
+
+    for m in re.finditer(r"\[\s*(\w+)\s*\]\s*=\s*COMBO_ACTION\s*\(\s*(\w+)\s*\)", body_text):
+        ev, seq = m.group(1), m.group(2)
+        if seq not in seqs:
+            continue
+        pos = resolve(seqs[seq])
+        if not pos or len(set(pos)) != len(pos):
+            print(f"warning: combo {ev}: its keys are not all on the base layer, so it is left out",
+                  file=sys.stderr)
+            continue
+        label = action_text(actions.get(ev, "")) or re.sub(r"_COMBO$", "", ev)
+        combos.append({"name": re.sub(r"_COMBO$", "", ev), "positions": pos,
+                       "binding": f"&kp {qk_code(label)}", "layers": None, "timeout": None})
 
     # --- tri-layer: update_tri_layer_state(state, _LOWER, _RAISE, _ADJUST) = conditional layer
     for m in re.finditer(r"\bupdate_tri_layer(?:_state)?\s*\(\s*(?:\w+\s*,\s*)?(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\)",
@@ -3136,7 +3233,7 @@ def main():
     fmt = detect_format(path, text) if a.format == "auto" else a.format
     if fmt == "qmk":
         layers, combos, row_lens, defines = parse_qmk(
-            text, rows, {"auto": None, "yes": True, "no": False}[a.split])
+            text, rows, {"auto": None, "yes": True, "no": False}[a.split], hint=str(path.resolve()))
     else:
         layers, combos, row_lens, defines = parse_keymap(text, rows, base_dir=path.parent)
     if not layers:                        # nothing to draw: say so and write nothing
