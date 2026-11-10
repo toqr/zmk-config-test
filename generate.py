@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-zmk_visualizer.py - turn a ZMK .keymap into a 2-page PDF.
+zmk_visualizer.py - turn a ZMK .keymap or a QMK keymap.c into a 2-page PDF.
 
-    python3 zmk_visualizer.py my.keymap                 # writes my.pdf
+    python3 zmk_visualizer.py my.keymap                 # ZMK:  writes my.pdf
+    python3 zmk_visualizer.py keymap.c                  # QMK:  writes keymap.pdf
+    python3 zmk_visualizer.py keymap.c --split no       # QMK board that is one block of keys (no gap in the middle)
     python3 zmk_visualizer.py my.keymap -o out.pdf --open
     python3 zmk_visualizer.py my.keymap --rows 10,10,10,4   # only if the key rows can't be detected
 
-The keymap file is looked for in the "config" folder and nowhere else: give its name, or leave
-the name out and the one .keymap file in that folder is used.
+Give ONE file: a ZMK .keymap or a QMK keymap.c. The kind is taken from the file ending (.keymap = ZMK,
+.c = QMK; --format overrides it). The file is looked for in the "config" folder (then in the current
+folder, where a QMK keymap.c usually is); leave the name out and the one .keymap (or .c) file there is used.
 
 Besides the PDF it writes, next to it:
     current-keymap.pdf                            - a copy of the PDF you just made
@@ -52,7 +55,15 @@ Page 1 - FLOW CHART. Every layer is a node, placed left to right by how many ste
          are drawn as little symbols.
          A "how to read" panel explains the colours. Combos are drawn at the bottom as mini
          keyboards (red = keys pressed together).
-Page 2 - the whole keymap as text, with every comment removed.
+Page 2 - ZMK: the whole keymap as text, with every comment removed.
+         QMK: the original keymap.c, exactly as it is (comments kept, dimmed).
+
+QMK keymaps: the layers come from `keymaps[]` (LAYOUT(...) macros or a raw matrix) and are named after
+the layer enum / #defines. Understood: KC_* keycodes, MO / TG / TO / OSL / TT / DF / LM / LT, mod-taps
+(LSFT_T(), MT(), ...), modifier wrappers (LCTL(KC_C), S(KC_1)), OSM, tap dance (TD), #define macros
+(also variadic row macros), custom keycodes that turn a layer on in process_record_user, COMBO(...)
+(keys are looked up on the base layer) and update_tri_layer_state(), which is drawn like a ZMK
+conditional layer. The result goes through the same drawing code as a ZMK keymap.
 
 Standard library only. Comments in the .keymap (including boxed/aligned ones) are ignored.
 """
@@ -204,6 +215,19 @@ BINDING_STARTS = set()          # macro names that stand for a whole binding (se
 ROW_LEFTS = None                # keys on the left half of each row, when the file shows where the split is
 
 
+BUILTIN_CELLS = {"kp": 1, "kt": 1, "mo": 1, "to": 1, "tog": 1, "sl": 1, "sk": 1, "lt": 2, "mt": 2, "mkp": 1,
+                 "mmv": 1, "msc": 1, "trans": 0, "none": 0, "bootloader": 0, "sys_reset": 0, "caps_word": 0,
+                 "key_repeat": 0, "gresc": 0, "out": 1}
+
+
+def cells_of(binding):
+    """How many parameters the behaviour of this binding takes, or None when that is not known."""
+    beh = binding.split()[0].lstrip("&")
+    if beh in BEH and BEH[beh].get("cells") is not None:
+        return BEH[beh]["cells"]
+    return BUILTIN_CELLS.get(beh)
+
+
 def split_bindings(line):
     """'&kp Q &mo 1 &kp LG(Z)' -> ['&kp Q', '&mo 1', '&kp LG(Z)']"""
     merged, buf = [], ""
@@ -218,6 +242,9 @@ def split_bindings(line):
     for tok in merged:
         if tok.startswith("&") or tok in BINDING_STARTS or not out:
             out.append(tok)
+        elif re.fullmatch(r"[A-Za-z_]\w*", tok) and cells_of(out[-1]) is not None \
+                and len(out[-1].split()) - 1 >= cells_of(out[-1]):
+            out.append("&kp " + tok)           # a macro that is not defined in this file (U_MS_U): a key of its own
         else:
             out[-1] += " " + tok
     return out
@@ -245,6 +272,98 @@ def guess_rows(total):
     return [total]
 
 
+# --------------------------------------------------------------------------- zmk-helpers macros
+# Many keymaps (urob's zmk-config and everything built on the zmk-helpers module) do not write
+# `keymap { ... }` / `behaviors { ... }` nodes. They call macros - ZMK_LAYER(), ZMK_HOLD_TAP(),
+# ZMK_MOD_MORPH(), ZMK_CONDITIONAL_LAYER(), ZMK_COMBO() ... - that a header from a module turns into
+# those nodes. That header is not part of the keymap file, so the macros are expanded here.
+_ZH_BEH = {"HOLD_TAP": "zmk,behavior-hold-tap", "MOD_MORPH": "zmk,behavior-mod-morph",
+           "TAP_DANCE": "zmk,behavior-tap-dance", "MACRO": "zmk,behavior-macro",
+           "MACRO_ONE_PARAM": "zmk,behavior-macro-one-param", "MACRO_TWO_PARAM": "zmk,behavior-macro-two-param",
+           "TRI_STATE": "zmk,behavior-tri-state", "ADAPTIVE_KEY": "zmk,behavior-adaptive-key"}
+_ZH_CELLS = {"HOLD_TAP": 2, "MACRO_ONE_PARAM": 1, "MACRO_TWO_PARAM": 2}          # the others take no parameter
+_ZH = re.compile(r"\bZMK_(LAYER|CONDITIONAL_LAYER|COMBO(?:_\d+)?|" + "|".join(sorted(_ZH_BEH, key=len, reverse=True)) + r")\s*\(")
+
+
+def inline_local_includes(text, folder, depth=0):
+    """`#include "combos.dtsi"` -> the content of that file, when it sits next to the keymap."""
+    def one(m):
+        f = Path(folder) / m.group(1)
+        if depth < 4 and f.is_file():
+            try:
+                return inline_local_includes(f.read_text(errors="replace"), f.parent, depth + 1)
+            except OSError:
+                pass
+        return m.group(0)
+    return re.sub(r'^[ \t]*#[ \t]*include[ \t]+"([^"\n]+)"[^\n]*$', one, text, flags=re.M)
+
+
+def zmk_combo_dispatch(src):
+    """zmk-helpers picks ZMK_COMBO_<n> by the number of arguments; a keymap may redefine one of them."""
+    mine = set(re.findall(r"#\s*define\s+ZMK_COMBO_(\d+)\s*\(", src))
+    if not mine:
+        return src
+    out, pos = [], 0
+    for m in re.finditer(r"\bZMK_COMBO\s*\(", src):
+        if m.start() < pos:
+            continue
+        args, end = _call_args(src, m.end() - 1)
+        if args is not None and str(len(args)) in mine:
+            out += [src[pos:m.start()], f"ZMK_COMBO_{len(args)}("]
+            pos = m.end()
+    out.append(src[pos:])
+    return "".join(out)
+
+
+def zmk_helpers(clean):
+    """Expand the zmk-helpers macros left in the preprocessed text into plain devicetree nodes."""
+    if not _ZH.search(clean):
+        return clean
+    out, pos = [], 0
+    layer_nodes, beh_nodes, combo_nodes, cond_nodes = [], [], [], []
+    for m in _ZH.finditer(clean):
+        if m.start() < pos:
+            continue
+        args, end = _call_args(clean, m.end() - 1)
+        if args is None:
+            continue
+        kind, name = m.group(1), (args[0].strip() if args else "")
+        rest = ",".join(args[1:])
+        if kind == "LAYER" and len(args) >= 2:
+            layer_nodes.append(f"{name} {{ bindings = <{' '.join(a.strip() for a in args[1:])}>; }};")
+        elif kind == "CONDITIONAL_LAYER" and len(args) >= 3:
+            cond_nodes.append(f"{name} {{ if-layers = <{args[1].strip()}>; then-layer = <{args[2].strip()}>; }};")
+        elif kind.startswith("COMBO") and len(args) >= 4:
+            pos_toks = args[2].replace(SPLIT_MARK, " ").split()
+            if not all(re.fullmatch(r"\d+", t) for t in pos_toks):
+                print(f"warning: combo {name}: its key positions ({' '.join(pos_toks)}) are labels from a "
+                      f"key-label header, which is not in the file - it is left out", file=sys.stderr)
+            else:
+                lay = " ".join(re.findall(r"-?\d+", args[3]))
+                tmo = args[4].strip() if len(args) > 4 and re.fullmatch(r"\s*\d+\s*", args[4]) else ""
+                combo_nodes.append(
+                    f"{name} {{ key-positions = <{' '.join(pos_toks)}>; bindings = <{args[1].strip()}>;"
+                    + (f" layers = <{lay}>;" if lay else "") + (f" timeout-ms = <{tmo}>;" if tmo else "") + " };")
+        elif kind in _ZH_BEH:
+            beh_nodes.append(f'{name}: {name} {{ compatible = "{_ZH_BEH[kind]}"; '
+                             f'#binding-cells = <{_ZH_CELLS.get(kind, 0)}>; {rest} }};')
+        else:
+            continue
+        out.append(clean[pos:m.start()])
+        pos = end
+    out.append(clean[pos:])
+    gen = []
+    if layer_nodes:
+        gen.append('keymap { compatible = "zmk,keymap"; ' + " ".join(layer_nodes) + " };")
+    if beh_nodes:
+        gen.append("behaviors { " + " ".join(beh_nodes) + " };")
+    if combo_nodes:
+        gen.append('combos { compatible = "zmk,combos"; ' + " ".join(combo_nodes) + " };")
+    if cond_nodes:
+        gen.append('conditional_layers { compatible = "zmk,conditional-layers"; ' + " ".join(cond_nodes) + " };")
+    return "".join(out) + "\n/ { " + " ".join(gen) + " };\n"
+
+
 CONDITIONAL = []   # conditional layers: [{"name", "ifs": [layers], "then": layer}]
 BEH = {}        # behaviours defined in the file: label -> {"compat", "bindings", "mode"}
 
@@ -258,8 +377,10 @@ def parse_behaviors(root):
             if comp and "behavior" in comp.group(1) and ":" in header:
                 bd = re.search(r"\bbindings\s*=\s*([^;]*);", body)
                 mode = re.search(r'toggle-mode\s*=\s*"([^"]*)"', body)
+                cells = re.search(r"#binding-cells\s*=\s*<(\d+)>", body)
                 BEH[header.split(":")[0].strip()] = {
                     "compat": comp.group(1),
+                    "cells": int(cells.group(1)) if cells else None,
                     "bindings": re.findall(r"&(\w+)", bd.group(1)) if bd else [],
                     "raw": [x.strip() for x in re.findall(r"<([^>]*)>", bd.group(1))] if bd else [],
                     "mode": mode.group(1) if mode else "toggle"}
@@ -267,9 +388,12 @@ def parse_behaviors(root):
     walk(root)
 
 
-def parse_keymap(text, forced_rows=None):
+def parse_keymap(text, forced_rows=None, base_dir=None):
     global BINDING_STARTS, ROW_LEFTS
-    clean, defines, BINDING_STARTS = preprocess(strip_comments_marked(text))
+    if base_dir is not None:                           # #include "combos.dtsi" next to the keymap
+        text = inline_local_includes(text, base_dir)
+    clean, defines, BINDING_STARTS = preprocess(zmk_combo_dispatch(strip_comments_marked(text)))
+    clean = zmk_helpers(clean)
     root = parse_nodes(clean)
     parse_behaviors(root)
     keymap_body = find_node(root, "keymap")
@@ -321,6 +445,8 @@ def parse_keymap(text, forced_rows=None):
         bd = re.search(r"\bbindings\s*=\s*<([^>]*)>", body)
         if not (kp and bd):
             continue
+        if not all(re.fullmatch(r"\d+", t) for t in kp.group(1).split()):
+            continue                                   # key labels (LT1 ...) that could not be resolved
         ly = re.search(r"\blayers\s*=\s*<([^>]*)>", body)
         to = re.search(r"timeout-ms\s*=\s*<(\d+)>", body)
         nm = header.split(":")[-1].strip()
@@ -380,7 +506,7 @@ KP = {
     "VOLUME_DOWN": ICON_VOL_DN,
     "C_BRIGHTNESS_INC": ICON_BR_UP, "C_BRI_UP": ICON_BR_UP, "BRIGHTNESS_UP": ICON_BR_UP,
     "C_BRIGHTNESS_DEC": ICON_BR_DN, "C_BRI_DN": ICON_BR_DN, "BRIGHTNESS_DOWN": ICON_BR_DN,
-    "C_STOP": "Stop",
+    "C_STOP": "Stop", "C_PREV": "Prev", "QMARK": "?", "EXCL": "!", "LT": "<", "GT": ">", "K_CANCEL": "Cancel",
 }
 MODFN = {"S": "Shift", "C": "Ctrl", "A": "Alt", "G": "GUI"}
 ARROW = {"LEFT": "←", "DOWN": "↓", "UP": "↑", "RIGHT": "→"}
@@ -393,7 +519,12 @@ SHIFTED = {"N1": "!", "N2": "@", "N3": "#", "N4": "$", "N5": "%", "N6": "^", "N7
            "DOT": ">", "FSLH": "?", "LBKT": "{", "RBKT": "}", "BSLH": "|", "GRAVE": "~"}
 
 
+QMK_TEXT = {}                   # QMK keys: code used inside a binding -> the text drawn on the key
+
+
 def kp_label(code):
+    if code in QMK_TEXT:
+        return QMK_TEXT[code]
     m = re.fullmatch(r"([LR])([SCAG])\((.+)\)", code)
     if m and m.group(2) == "S" and m.group(3) in SHIFTED:
         return SHIFTED[m.group(3)]                  # LS(N9) is just "("
@@ -882,6 +1013,23 @@ def layer_color(i):
 
 
 # --------------------------------------------------------------------------- key labels
+PLAIN_BEH = {"kp", "sk", "mo", "tog", "to", "sl", "lt", "mt", "trans", "none", "sys_reset", "bootloader", "bt",
+             "msc", "mmv", "mkp", "out", "caps_word", "key_repeat"}
+
+
+def nested_label(b, depth=0):
+    """The text for a binding that may be a custom behaviour: a mod-morph, tap-dance or adaptive-key shows
+    what a plain tap of it does (its first binding); other behaviours that are not defined here by name."""
+    p = b.split()
+    beh = p[0].lstrip("&")
+    mb = BEH.get(beh)
+    if mb and depth < 6 and mb["raw"] and any(k in mb["compat"] for k in ("mod-morph", "tap-dance", "adaptive-key")):
+        return nested_label(mb["raw"][0], depth + 1)
+    if mb is None and beh not in PLAIN_BEH and len(p) > 1 and beh not in ("kt",):
+        return beh.replace("_", " ").title()        # a behaviour from a module (num_word 3 -> Num Word)
+    return label(b)[0]
+
+
 def describe(b, layers, defines):
     """binding -> (main text, small text, underline main, underline small)"""
     p = b.split()
@@ -894,15 +1042,15 @@ def describe(b, layers, defines):
         kind, tgt = act
         name = layers[tgt]["name"] if 0 <= tgt < len(layers) else f"L{tgt}"
         if kind == "taphold":                         # tap = the key, hold = the layer
-            tap = label(f"&{ht[1]} {p[2]}")[0] if len(p) > 2 else ""
+            tap = nested_label(f"&{ht[1]} {p[2]}") if len(p) > 2 else ""
             return tap, name, False, True
         return name, {"hold": "", "toggle": "toggle", "switch": "go to", "oneshot": "1-shot",
                       "off": "turn off"}[kind], True, False
     mb = BEH.get(beh)
     if mb and "mod-morph" in mb["compat"] and len(mb["raw"]) >= 2:    # e.g. Backspace, Delete with Shift
-        return label(mb["raw"][0])[0], label(mb["raw"][1])[0], False, False
+        return label(mb["raw"][0])[0], nested_label(mb["raw"][1]), False, False
     if ht and len(p) > 2:                             # a mod-tap: tap = the key, hold = the modifier
-        return label(f"&{ht[1]} {p[2]}")[0], label(f"&{ht[0]} {p[1]}")[0], False, False
+        return nested_label(f"&{ht[1]} {p[2]}"), nested_label(f"&{ht[0]} {p[1]}"), False, False
     return label(b)[0], "", False, False
 
 
@@ -995,11 +1143,19 @@ def draw_key(c, x, y, ks, b, layers, defines, th, state=None, part="both"):
 
 
 # --------------------------------------------------------------------------- geometry
+MONOBLOCK = False               # True for a QMK keyboard that is one block of keys (no gap between halves)
+
+
 class Board:
     """Split keyboard: left/right halves, short bottom row sits under the inner columns."""
 
     def __init__(self, row_lens, ks, gap, split):
         self.ks, self.gap, self.split = ks, gap, split
+        if MONOBLOCK:                                   # one block of keys, every row starts at the left
+            self.cells = [(i * (ks + gap), r * (ks + gap)) for r, n in enumerate(row_lens) for i in range(n)]
+            self.w = max(row_lens) * (ks + gap) - gap
+            self.h = len(row_lens) * (ks + gap) - gap
+            return
         lefts = [(ROW_LEFTS[r] if ROW_LEFTS and len(ROW_LEFTS) == len(row_lens) else n // 2)
                  for r, n in enumerate(row_lens)]
         M = max(max(lf, n - lf) for lf, n in zip(lefts, row_lens))
@@ -1556,7 +1712,11 @@ def flow_page(layers, combos, row_lens, defines, src_name):
         side_n, sn = {}, defaultdict(int)
         side_left = {}
         for e in sorted(edges, key=lambda e: dep[e["id"]]):
-            if anchor_leg[e["id"]] == "side":
+            # an arrow runs down the margin when its anchor key cannot go straight down - or, for a
+            # combo, when one of the other keys of the combo cannot
+            if anchor_leg[e["id"]] == "side" or any(
+                    not room_below(cl) for k_, cl in enumerate(trig_cells[e["id"]])
+                    if k_ != anchor_idx[e["id"]]):
                 side_n[e["id"]] = sn[e["src"]]
                 sn[e["src"]] += 1
         keyoff = {}
@@ -1951,6 +2111,648 @@ def flow_page(layers, combos, row_lens, defines, src_name):
     return c
 
 
+# --------------------------------------------------------------------------- QMK keymap.c parser
+# A QMK keymap is C code, not a device tree, so it has its own parser.  It reads the layer names
+# (enum / #define), the `keymaps[]` array (LAYOUT(...) macros or raw matrices), the keycodes
+# (KC_*, MO/TG/TO/OSL/TT/DF/LM/LT, mod-taps, modifier wrappers, tap dance, custom keycodes), the
+# combos and the tri-layer rule, and turns them into exactly the same model the ZMK parser makes
+# (layers of "&kp A" / "&mo 1" style bindings), so the flow chart is drawn by the same code.
+_QK = {}
+
+
+def _qk(text, *names):
+    for n in names:
+        _QK[n] = text
+
+
+for _t, _n in [
+    ("Esc", "ESCAPE ESC"), ("`", "GRAVE GRV"), ("~", "TILDE TILD"), ("Tab", "TAB"),
+    ("Caps", "CAPS_LOCK CAPS CLCK CAPSLOCK"), ("Enter", "ENTER ENT RETURN"), ("Space", "SPACE SPC"),
+    ("Bksp", "BACKSPACE BSPC"), ("Del", "DELETE DEL"), ("-", "MINUS MINS"), ("=", "EQUAL EQL"),
+    ("[", "LEFT_BRACKET LBRC"), ("]", "RIGHT_BRACKET RBRC"), ("\\", "BACKSLASH BSLS"),
+    (";", "SEMICOLON SCLN"), ("'", "QUOTE QUOT"), (",", "COMMA COMM"), (".", "DOT"), ("/", "SLASH SLSH"),
+    ("#", "NONUS_HASH NUHS HASH"), ("\\", "NONUS_BACKSLASH NUBS"),
+    ("!", "EXCLAIM EXLM"), ("@", "AT"), ("$", "DOLLAR DLR"), ("%", "PERCENT PERC"),
+    ("^", "CIRCUMFLEX CIRC"), ("&", "AMPERSAND AMPR"), ("*", "ASTERISK ASTR"), ("(", "LEFT_PAREN LPRN"),
+    (")", "RIGHT_PAREN RPRN"), ("_", "UNDERSCORE UNDS"), ("+", "PLUS"), ("{", "LEFT_CURLY_BRACE LCBR"),
+    ("}", "RIGHT_CURLY_BRACE RCBR"), ("|", "PIPE"), (":", "COLON COLN"),
+    ('"', "DOUBLE_QUOTE DQUO DQT"), ("<", "LEFT_ANGLE_BRACKET LABK LT"),
+    (">", "RIGHT_ANGLE_BRACKET RABK GT"), ("?", "QUESTION QUES"),
+    ("←", "LEFT"), ("→", "RIGHT RGHT"), ("↑", "UP"), ("↓", "DOWN"),
+    ("Home", "HOME"), ("End", "END"), ("PgUp", "PAGE_UP PGUP"), ("PgDn", "PAGE_DOWN PGDN"),
+    ("Ins", "INSERT INS"), ("PrtSc", "PRINT_SCREEN PSCR"), ("ScrLk", "SCROLL_LOCK SCRL SLCK"),
+    ("Pause", "PAUSE PAUS BRK"), ("Menu", "APPLICATION APP"),
+    ("Ctrl", "LEFT_CTRL LCTL LCTRL"), ("RCtrl", "RIGHT_CTRL RCTL RCTRL"),
+    ("Shift", "LEFT_SHIFT LSFT LSHIFT"), ("RShift", "RIGHT_SHIFT RSFT RSHIFT"),
+    ("Alt", "LEFT_ALT LALT LOPT"), ("RAlt", "RIGHT_ALT RALT ROPT ALGR"),
+    ("GUI", "LEFT_GUI LGUI LCMD LWIN"), ("RGUI", "RIGHT_GUI RGUI RCMD RWIN"),
+    (ICON_MUTE, "AUDIO_MUTE MUTE"), (ICON_VOL_UP, "AUDIO_VOL_UP VOLU"), (ICON_VOL_DN, "AUDIO_VOL_DOWN VOLD"),
+    ("Play/Pause", "MEDIA_PLAY_PAUSE MPLY"), ("Next", "MEDIA_NEXT_TRACK MNXT"),
+    ("Prev", "MEDIA_PREV_TRACK MPRV"), ("Stop", "MEDIA_STOP MSTP"), ("Eject", "MEDIA_EJECT EJCT"),
+    ("FF", "MEDIA_FAST_FORWARD MFFD"), ("Rew", "MEDIA_REWIND MRWD"),
+    (ICON_BR_UP, "BRIGHTNESS_UP BRIU"), (ICON_BR_DN, "BRIGHTNESS_DOWN BRID"),
+    ("Calc", "CALCULATOR CALC"), ("Mail", "MAIL"), ("Computer", "MY_COMPUTER MYCM"),
+    ("Browser", "WWW_HOME WHOM"), ("Back", "WWW_BACK WBAK"), ("Fwd", "WWW_FORWARD WFWD"),
+    ("Refresh", "WWW_REFRESH WREF"), ("Search", "WWW_SEARCH WSCH"),
+    ("KP /", "KP_SLASH PSLS"), ("KP *", "KP_ASTERISK PAST"), ("KP -", "KP_MINUS PMNS"),
+    ("KP +", "KP_PLUS PPLS"), ("KP Enter", "KP_ENTER PENT"), ("KP .", "KP_DOT PDOT"),
+    ("KP =", "KP_EQUAL PEQL"), ("NumLk", "NUM_LOCK NUM NLCK"),
+    ("Move ↑", "MS_UP MS_U"), ("Move ↓", "MS_DOWN MS_D"), ("Move ←", "MS_LEFT MS_L"),
+    ("Move →", "MS_RIGHT MS_R"), ("Btn 1", "MS_BTN1 BTN1"), ("Btn 2", "MS_BTN2 BTN2"),
+    ("Btn 3", "MS_BTN3 BTN3"), ("Btn 4", "MS_BTN4 BTN4"), ("Btn 5", "MS_BTN5 BTN5"),
+    ("Scroll ↑", "MS_WHEEL_UP WH_U"), ("Scroll ↓", "MS_WHEEL_DOWN WH_D"),
+    ("Scroll ←", "MS_WHEEL_LEFT WH_L"), ("Scroll →", "MS_WHEEL_RIGHT WH_R"),
+    ("Accel 0", "MS_ACCEL0 ACL0"), ("Accel 1", "MS_ACCEL1 ACL1"), ("Accel 2", "MS_ACCEL2 ACL2"),
+    ("BOOT", "QK_BOOT QK_BOOTLOADER RESET"), ("Reboot", "QK_REBOOT QK_RBT"), ("Clear EEPROM", "EE_CLR QK_CLEAR_EEPROM"),
+    ("RGB", "RGB_TOG UG_TOGG"), ("RGB Mode", "RGB_MOD UG_NEXT"), ("RGB Mode -", "RGB_RMOD UG_PREV"),
+    ("Hue +", "RGB_HUI UG_HUEU"), ("Hue -", "RGB_HUD UG_HUED"), ("Sat +", "RGB_SAI UG_SATU"),
+    ("Sat -", "RGB_SAD UG_SATD"), ("Val +", "RGB_VAI UG_VALU"), ("Val -", "RGB_VAD UG_VALD"),
+    ("Back-light", "BL_TOGG BL_TOG"), ("Light +", "BL_INC BL_UP"), ("Light -", "BL_DEC BL_DOWN"),
+    ("Hyper", "HYPR"), ("Meh", "MEH"), ("Language", "LANG1 LNG1"), ("Copy", "COPY"), ("Paste", "PSTE PASTE"),
+    ("Cut", "CUT"), ("Undo", "UNDO"), ("Redo", "AGIN"), ("Find", "FIND"), ("Help", "HELP"),
+    ("Sleep", "SYSTEM_SLEEP SLEP"), ("Power", "SYSTEM_POWER PWR"), ("Wake", "SYSTEM_WAKE WAKE"),
+    ("Caps Word", "CAPS_WORD CW_TOGG"), ("Repeat", "REPEAT_KEY QK_REPEAT_KEY"),
+]:
+    _qk(_t, *_n.split())
+for _i in range(10):
+    _qk(f"KP {_i}", f"KP_{_i}", f"P{_i}")
+_QK_MODS = {"CTL": "Ctrl", "CTRL": "Ctrl", "SFT": "Shift", "SHIFT": "Shift", "ALT": "Alt", "OPT": "Alt",
+            "GUI": "GUI", "CMD": "GUI", "WIN": "GUI"}
+_QK_MODNAME = {"C": "Ctrl", "S": "Shift", "A": "Alt", "G": "GUI"}
+# wrapper functions around a keycode: name -> modifiers it presses
+_QK_WRAP = {"LCTL": ["Ctrl"], "LSFT": ["Shift"], "LALT": ["Alt"], "LGUI": ["GUI"], "LCMD": ["GUI"],
+            "RCTL": ["RCtrl"], "RSFT": ["RShift"], "RALT": ["RAlt"], "RGUI": ["RGUI"], "RCMD": ["RGUI"],
+            "C": ["Ctrl"], "S": ["Shift"], "A": ["Alt"], "G": ["GUI"], "ALGR": ["RAlt"],
+            "HYPR": ["Ctrl", "Shift", "Alt", "GUI"], "MEH": ["Ctrl", "Shift", "Alt"],
+            "LCA": ["Ctrl", "Alt"], "LSG": ["Shift", "GUI"], "SGUI": ["Shift", "GUI"],
+            "LCAG": ["Ctrl", "Alt", "GUI"], "LSA": ["Shift", "Alt"], "LCS": ["Ctrl", "Shift"],
+            "RSA": ["RShift", "RAlt"], "RCS": ["RCtrl", "RShift"], "RSG": ["RShift", "RGUI"]}
+_QK_ORDER = {"Ctrl": 0, "RCtrl": 0, "Shift": 1, "RShift": 1, "Alt": 2, "RAlt": 2, "GUI": 3, "RGUI": 3}
+# mod-tap names: LSFT_T(kc) -> modifiers it presses when held
+_QK_MT = {f"{p}_T": m for p, m in {
+    "LCTL": ["Ctrl"], "CTL": ["Ctrl"], "RCTL": ["RCtrl"], "LSFT": ["Shift"], "SFT": ["Shift"],
+    "RSFT": ["RShift"], "LALT": ["Alt"], "ALT": ["Alt"], "LOPT": ["Alt"], "RALT": ["RAlt"],
+    "ROPT": ["RAlt"], "ALGR": ["RAlt"], "LGUI": ["GUI"], "GUI": ["GUI"], "LCMD": ["GUI"], "LWIN": ["GUI"],
+    "RGUI": ["RGUI"], "RCMD": ["RGUI"], "RWIN": ["RGUI"], "SGUI": ["Shift", "GUI"], "SCMD": ["Shift", "GUI"],
+    "SWIN": ["Shift", "GUI"], "LSG": ["Shift", "GUI"], "LCA": ["Ctrl", "Alt"], "LCAG": ["Ctrl", "Alt", "GUI"],
+    "MEH": ["Ctrl", "Shift", "Alt"], "HYPR": ["Ctrl", "Shift", "Alt", "GUI"], "ALL": ["Ctrl", "Shift", "Alt", "GUI"],
+    "C_S": ["Ctrl", "Shift"], "LCS": ["Ctrl", "Shift"], "LSA": ["Shift", "Alt"], "RSA": ["RShift", "RAlt"],
+    "RCS": ["RCtrl", "RShift"], "RSG": ["RShift", "RGUI"]}.items()}
+_QK_MT["ALL_T"] = ["Hyper"]
+_QK_MT["HYPR_T"] = ["Hyper"]
+_QK_MT["MEH_T"] = ["Meh"]
+_QK_MT["LCAG_T"] = ["Ctrl+Alt+GUI"]
+_QK_SHIFT_OF = {t: _QK[n] for t, n in {"1": "EXCLAIM", "2": "AT", "3": "HASH", "4": "DOLLAR", "5": "PERCENT",
+                                       "6": "CIRCUMFLEX", "7": "AMPERSAND", "8": "ASTERISK", "9": "LEFT_PAREN",
+                                       "0": "RIGHT_PAREN", "-": "UNDERSCORE", "=": "PLUS", "[": "LEFT_CURLY_BRACE",
+                                       "]": "RIGHT_CURLY_BRACE", "\\": "PIPE", ";": "COLON", "'": "DOUBLE_QUOTE",
+                                       ",": "LEFT_ANGLE_BRACKET", ".": "RIGHT_ANGLE_BRACKET", "/": "QUESTION",
+                                       "`": "TILDE", "#": "TILDE"}.items()}
+_QMK_CODES = {}                  # display text -> synthetic code ("Q#3") used inside bindings
+
+
+def qk_code(text):
+    """A binding is split on spaces, so a key's text is stored once and the binding carries a
+    short code for it (kp_label() turns the code back into the text)."""
+    if text not in _QMK_CODES:
+        _QMK_CODES[text] = f"Q#{len(_QMK_CODES)}"
+        QMK_TEXT[_QMK_CODES[text]] = text
+    return _QMK_CODES[text]
+
+
+def qmk_args(s):
+    """Split on the commas that are not inside brackets: 'LT(1, KC_A), KC_B' -> ['LT(1, KC_A)', 'KC_B']"""
+    out, cur, depth = [], [], 0
+    for ch in s:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+    last = "".join(cur).strip()
+    if last or out:
+        out.append(last)
+    return out
+
+
+def qmk_inner(s, j):
+    """s[j] is an opening bracket -> (text inside, index after the closing bracket)."""
+    pairs = {"(": ")", "{": "}", "[": "]"}
+    open_, close, depth, k = s[j], pairs[s[j]], 0, j
+    while k < len(s):
+        if s[k] == open_:
+            depth += 1
+        elif s[k] == close:
+            depth -= 1
+            if depth == 0:
+                return s[j + 1:k], k + 1
+        k += 1
+    return s[j + 1:], len(s)
+
+
+def qmk_expand(s, objs, funcs, blocked=frozenset(), depth=0):
+    """#define expansion like _expand(), plus variadic macros (__VA_ARGS__), which keymaps use for
+    LAYOUT_wrapper() and the row macros."""
+    if depth > 40:
+        return s
+    out, pos = [], 0
+    for m in re.finditer(r"[A-Za-z_]\w*", s):
+        if m.start() < pos:
+            continue
+        name = m.group(0)
+        if name in blocked:
+            continue
+        if name in funcs:
+            j = m.end()
+            while j < len(s) and s[j] in " \t":
+                j += 1
+            if j < len(s) and s[j] == "(":
+                inner, end = qmk_inner(s, j)
+                args = qmk_args(inner) if inner.strip() else []
+                params, body = funcs[name]
+                named = [p for p in params if p != "..."]
+                mp = {p: a.strip() for p, a in zip(named, args)}
+                if "..." in params:
+                    mp["__VA_ARGS__"] = ", ".join(a.strip() for a in args[len(named):])
+                body = re.sub(r"[A-Za-z_]\w*", lambda mm: mp.get(mm.group(0), mm.group(0)), body)
+                body = re.sub(r"\s*##\s*", "", body)
+                out += [s[pos:m.start()], qmk_expand(body, objs, funcs, blocked | {name}, depth + 1)]
+                pos = end
+        elif name in objs:
+            out += [s[pos:m.start()], qmk_expand(objs[name], objs, funcs, blocked | {name}, depth + 1)]
+            pos = m.end()
+    out.append(s[pos:])
+    return "".join(out)
+
+
+def qmk_defines(t):
+    """-> (text without preprocessor lines, object macros, function macros)"""
+    t = re.sub(r"\\[ \t]*\r?\n", " ", t)
+    objs, funcs, keep = {}, {}, []
+    for line in t.split("\n"):
+        m = re.match(r"\s*#\s*define\s+(\w+)(\(([^)]*)\))?[ \t]*(.*)$", line)
+        if m:
+            body = m.group(4).replace(SPLIT_MARK, " ").strip()
+            if m.group(3) is not None:
+                funcs[m.group(1)] = ([p.strip() for p in m.group(3).split(",") if p.strip()], body)
+            else:
+                objs[m.group(1)] = body
+            keep.append("")
+        elif re.match(r"\s*#", line):
+            keep.append("")
+        else:
+            keep.append(line)
+    return "\n".join(keep), objs, funcs
+
+
+def qmk_enums(text, objs, funcs):
+    """Every enum member and every numeric #define -> its number (the layer names live here)."""
+    nums = {}
+    for name, body in objs.items():
+        v = qmk_expand(body, objs, funcs, frozenset({name})).strip()
+        if re.fullmatch(r"-?\d+", v):
+            nums[name] = int(v)
+    for m in re.finditer(r"\benum\b[^{;]*\{([^}]*)\}", text):
+        n, custom = -1, False
+        for item in qmk_args(m.group(1)):
+            if not item:
+                continue
+            nm, _, val = item.partition("=")
+            nm, val = nm.strip(), val.strip()
+            if not re.fullmatch(r"\w+", nm):
+                continue
+            if val:
+                v = nums.get(val, val)
+                if isinstance(v, int) or re.fullmatch(r"-?\d+", str(v)):
+                    n = int(v)
+                else:
+                    custom = True                  # e.g. SAFE_RANGE: custom keycodes, not layers
+            else:
+                n += 1
+            if not custom:
+                nums.setdefault(nm, n)
+    return nums
+
+
+def qmk_layer_name(tok, k):
+    s = tok.strip()
+    if re.fullmatch(r"-?\d+", s):
+        return f"layer {s}"
+    s = re.sub(r"^_+", "", s)
+    s = re.sub(r"^(?:L|LAYER|LYR)_(?=\w)", "", s, flags=re.I)
+    if s.isupper() or s.islower():
+        s = s.lower()
+    s = s.replace("_", " ").strip()
+    return s or f"layer {k}"
+
+
+def qmk_pretty(code):
+    """A keycode this script does not know -> readable text (MY_MACRO -> My Macro)."""
+    s = re.sub(r"\s+", "", code)
+    s = re.sub(r"^(?:KC|QK)_", "", s)
+    if re.fullmatch(r"[A-Z0-9_]+", s):
+        return s.replace("_", " ").title()
+    return s
+
+
+class QmkKeys:
+    """Turns QMK keycodes into ZMK-style bindings ('&kp ..', '&mo 1', '&lt 1 ..', '&mt .. ..')."""
+
+    def __init__(self, layer_ref, custom_layer_keys):
+        self.layer_ref = layer_ref                     # name / number -> layer index or None
+        self.custom = custom_layer_keys                # custom keycode -> (behaviour, layer index)
+
+    def text(self, t):
+        """The label of a plain key (also modifier wrappers like LCTL(KC_C) and LSFT(KC_1))."""
+        t = t.strip()
+        n = t[3:] if t.startswith("KC_") else t
+        if n in _QK:
+            return _QK[n]
+        if re.fullmatch(r"[A-Z0-9]", n) or re.fullmatch(r"F\d{1,2}", n):
+            return n
+        m = re.fullmatch(r"(\w+)\s*\((.*)\)", t, re.S)
+        if m and m.group(1) in _QK_WRAP:
+            mods, inner = list(_QK_WRAP[m.group(1)]), m.group(2).strip()
+            while True:                                # LCTL(LSFT(KC_T)): collect the modifiers
+                mi = re.fullmatch(r"(\w+)\s*\((.*)\)", inner, re.S)
+                if mi and mi.group(1) in _QK_WRAP:
+                    mods += _QK_WRAP[mi.group(1)]
+                    inner = mi.group(2).strip()
+                else:
+                    break
+            base = self.text(inner)
+            if mods == ["Shift"] and base in _QK_SHIFT_OF:
+                return _QK_SHIFT_OF[base]
+            mods = sorted(dict.fromkeys(mods), key=lambda x: _QK_ORDER.get(x, 9))
+            return "+".join(mods + [base])
+        m = re.fullmatch(r"(?:TD|TAP_DANCE)\s*\((.*)\)", t)
+        if m:
+            return "TD " + qmk_pretty(re.sub(r"^TD_", "", m.group(1).strip()))
+        return qmk_pretty(t)
+
+    def mods(self, expr):
+        """MOD_LCTL | MOD_LSFT -> 'Ctrl+Shift'"""
+        out = []
+        for w in re.findall(r"MOD_(\w+)", expr):
+            side = "R" if w[0] == "R" else ""
+            base = w[1:] if w[0] in "LR" and w[1:] in _QK_MODS else w
+            out.append(side + _QK_MODS.get(base, base.title()))
+        return "+".join(dict.fromkeys(out)) or qmk_pretty(expr)
+
+    def kc(self, t):
+        return qk_code(self.text(t))
+
+    def binding(self, tok):
+        t = re.sub(r"\s+", " ", tok.strip())
+        if t in ("KC_NO", "XXXXXXX", "KC_NONE", ""):
+            return "&none"
+        if t in ("KC_TRNS", "_______", "KC_TRANSPARENT", "KC_TRANS"):
+            return "&trans"
+        if t in self.custom:
+            beh, idx = self.custom[t]
+            return f"&{beh} {idx}"
+        m = re.fullmatch(r"(\w+)\s*\((.*)\)", t, re.S)
+        if not m:
+            return f"&kp {self.kc(t)}"
+        fn, args = m.group(1), qmk_args(m.group(2))
+        ref = lambda a: self.layer_ref(a)
+        simple = {"MO": "mo", "TG": "tog", "TO": "to", "OSL": "sl", "TT": "mo", "DF": "to", "PDF": "to"}
+        if fn in simple and len(args) == 1 and ref(args[0]) is not None:
+            return f"&{simple[fn]} {ref(args[0])}"
+        if fn == "LM" and len(args) == 2 and ref(args[0]) is not None:
+            return f"&mo {ref(args[0])}"
+        if fn == "LT" and len(args) == 2 and ref(args[0]) is not None:
+            return f"&lt {ref(args[0])} {self.kc(args[1])}"
+        if fn == "MT" and len(args) == 2:
+            return f"&mt {qk_code(self.mods(args[0]))} {self.kc(args[1])}"
+        if fn in _QK_MT and len(args) == 1:
+            return f"&mt {qk_code('+'.join(_QK_MT[fn]))} {self.kc(args[0])}"
+        if fn == "OSM" and len(args) == 1:
+            return f"&sk {qk_code(self.mods(args[0]))}"
+        if fn == "SH_T" and len(args) == 1:
+            return f"&mt {qk_code('Swap')} {self.kc(args[0])}"
+        return f"&kp {self.kc(t)}"
+
+
+def qmk_split_keys(s):
+    """The text between the brackets of LAYOUT( ... ) -> (keys, row breaks, split markers).
+    A row break is a line break after N keys; a marker is a one-line /* */ comment after N keys
+    (people put one between the two halves of the keyboard)."""
+    toks, cur, depth, breaks, marks = [], [], 0, [], []
+    for ch in s:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if depth == 0 and ch == ",":
+            toks.append("".join(cur).strip())
+            cur = []
+        elif depth == 0 and ch == "\n":
+            breaks.append(len(toks) + (1 if "".join(cur).strip() else 0))
+        elif depth == 0 and ch == SPLIT_MARK:
+            marks.append(len(toks) + (1 if "".join(cur).strip() else 0))
+        elif ch == "\n" or ch == SPLIT_MARK:
+            cur.append(" ")
+        else:
+            cur.append(ch)
+    if "".join(cur).strip():
+        toks.append("".join(cur).strip())
+    return toks, breaks, marks
+
+
+def qmk_rows(n, breaks, marks):
+    """-> (row lengths, left-half sizes) from the line breaks of one layer"""
+    cuts = sorted({b for b in breaks if 0 < b < n})
+    edges_ = [0] + cuts + [n]
+    lens = [b - a for a, b in zip(edges_, edges_[1:])]
+    lefts = []
+    for a, b in zip(edges_, edges_[1:]):
+        inside = [m - a for m in marks if a < m < b]
+        lefts.append(min(inside, key=lambda k: abs(k - (b - a) / 2)) if inside else None)
+    return lens, lefts
+
+
+def qmk_find_array(text):
+    """The text inside `keymaps[][..][..] = { ... };`"""
+    m = re.search(r"\bkeymaps\s*(?:\[[^\]]*\]\s*)+=\s*\{", text)
+    if not m:
+        return None
+    return qmk_inner(text, m.end() - 1)[0]
+
+
+def qmk_custom_layer_keys(text, layer_ref):
+    """process_record_user() often turns a custom keycode into a layer key:
+    `case LOWER: layer_on(_LOWER) ... layer_off(_LOWER)` -> a key that holds _LOWER."""
+    out = {}
+    m = re.search(r"\bprocess_record\w*\s*\([^)]*\)\s*\{", text)
+    if not m:
+        return out
+    body = qmk_inner(text, m.end() - 1)[0]
+    parts = re.split(r"\bcase\s+(\w+)\s*:", body)
+    for name, chunk in zip(parts[1::2], parts[2::2]):
+        ons = re.findall(r"\blayer_on\s*\(\s*(\w+)\s*\)", chunk)
+        offs = re.findall(r"\blayer_off\s*\(\s*(\w+)\s*\)", chunk)
+        inv = re.findall(r"\blayer_invert\s*\(\s*(\w+)\s*\)", chunk)
+        mv = re.findall(r"\b(?:layer_move|set_single_persistent_default_layer|default_layer_set)\s*\(\s*(\w+)\s*\)", chunk)
+        pick = None
+        if ons and ons[0] in offs:
+            pick = ("mo", ons[0])
+        elif inv:
+            pick = ("tog", inv[0])
+        elif mv:
+            pick = ("to", mv[0])
+        elif ons:
+            pick = ("tog", ons[0])
+        if pick and layer_ref(pick[1]) is not None:
+            out[name] = (pick[0], layer_ref(pick[1]))
+    return out
+
+
+def qmk_wants_split(layout_name, row_lens, has_marks):
+    """Is this a split keyboard (two halves with a gap) or one block of keys?"""
+    n = layout_name.lower()
+    if "split" in n or any(k in n for k in ("crkbd", "corne", "lily58", "sofle", "kyria", "cradio", "iris",
+                                           "totem", "sweep", "ferris", "charybdis", "lotus", "dactyl")):
+        return True
+    if has_marks:
+        return True
+    if len(row_lens) >= 3 and all(r % 2 == 0 for r in row_lens) and len(set(row_lens[:-1])) == 1 \
+            and row_lens[-1] < row_lens[-2] and row_lens[0] >= 8:
+        return True
+    return False
+
+
+def parse_qmk(text, forced_rows=None, split=None):
+    """A QMK keymap.c -> (layers, combos, row_lens, defines), like parse_keymap() does for ZMK."""
+    global BINDING_STARTS, ROW_LEFTS, MONOBLOCK
+    BINDING_STARTS = set()
+    BEH.clear()
+    CONDITIONAL.clear()
+    QMK_TEXT.clear()
+    _QMK_CODES.clear()
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    clean = strip_comments_marked(text)
+    body_text, objs, funcs = qmk_defines(clean)
+    nums = qmk_enums(body_text, objs, funcs)
+    array = qmk_find_array(body_text)
+    if array is None:
+        sys.exit("error: no `keymaps[]` array found in the file (is this a QMK keymap.c?)")
+
+    # --- the layers: `[_NAME] = LAYOUT(...)`, or a plain `LAYOUT(...)`, or a raw matrix `{ {..}, {..} }`
+    items = []
+    for k, item in enumerate(qmk_args("\n".join(l for l in array.split("\n") if not l.lstrip().startswith("#")))):
+        if not item.strip():
+            continue
+        m = re.match(r"\s*\[\s*([^\]]+?)\s*\]\s*=\s*(.*)$", item, re.S)
+        idx_tok, expr = (m.group(1), m.group(2).strip()) if m else (str(len(items)), item.strip())
+        items.append((idx_tok, expr))
+
+    def number_of(tok):
+        tok = tok.strip()
+        if re.fullmatch(r"-?\d+", tok):
+            return int(tok)
+        if tok in nums:
+            return nums[tok]
+        v = qmk_expand(tok, objs, funcs).strip()
+        return int(v) if re.fullmatch(r"-?\d+", v) else None
+
+    raw_layers, seen = [], set()
+    for k, (idx_tok, expr) in enumerate(items):
+        num = number_of(idx_tok)
+        if num is None:
+            num = k
+        if num in seen:                                # the other branch of an #ifdef: keep the first
+            continue
+        seen.add(num)
+        lm = re.match(r"(\w+)\s*\(", expr)
+        if lm:
+            inner, _ = qmk_inner(expr, lm.end() - 1)
+            inner = qmk_expand(inner, objs, funcs)
+            toks, breaks, marks = qmk_split_keys(inner)
+            name = lm.group(1)
+        elif expr.startswith("{"):                     # a raw matrix: every inner {...} is a row
+            inner = qmk_inner(expr, 0)[0]
+            rows_ = [qmk_args(qmk_inner(r, 0)[0]) for r in qmk_args(inner) if r.startswith("{")]
+            toks = [t for r in rows_ for t in r if t != ""]
+            breaks, acc = [], 0
+            for r in rows_:
+                acc += len([t for t in r if t != ""])
+                breaks.append(acc)
+            marks, name = [], "matrix"
+        else:
+            continue
+        raw_layers.append({"num": num, "tok": idx_tok, "layout": name, "toks": toks,
+                           "breaks": breaks, "marks": marks})
+    if not raw_layers:
+        sys.exit("error: no layers found in the `keymaps[]` array")
+    raw_layers.sort(key=lambda r: r["num"])
+    numidx = {r["num"]: i for i, r in enumerate(raw_layers)}
+
+    def layer_ref(a):
+        v = number_of(a)
+        return numidx.get(v) if v is not None else None
+
+    custom = qmk_custom_layer_keys(body_text, layer_ref)
+    keys = QmkKeys(layer_ref, custom)
+
+    layers, lefts0 = [], None
+    for i, r in enumerate(raw_layers):
+        flat = [keys.binding(t) for t in r["toks"]]
+        lens, lefts = qmk_rows(len(flat), r["breaks"], r["marks"])
+        it = iter(flat)
+        lines = [[next(it) for _ in range(n)] for n in lens]
+        if i == 0:
+            lefts0 = lefts
+        layers.append({"idx": i, "name": qmk_layer_name(r["tok"], i), "title": r["tok"].strip(),
+                       "lines": lines, "flat": flat, "raw": r["toks"]})
+    if len(layers) > 1 and all(L["name"].endswith(" layer") for L in layers):
+        for L in layers:
+            L["name"] = L["name"][:-6]
+
+    # --- rows and halves
+    first = [len(l) for l in layers[0]["lines"]]
+    if forced_rows:
+        row_lens = forced_rows
+    else:
+        row_lens = first if len(first) > 1 else guess_rows(len(layers[0]["flat"]))
+    is_split = split if split is not None else qmk_wants_split(
+        raw_layers[0]["layout"], row_lens, bool(lefts0 and any(k is not None for k in lefts0)))
+    ROW_LEFTS = None
+    MONOBLOCK = not is_split
+    if is_split and not forced_rows and len(first) > 1 and lefts0 and any(k is not None for k in lefts0):
+        ROW_LEFTS = [k if k is not None else n // 2 for k, n in zip(lefts0, row_lens)]
+    total = sum(row_lens)
+    for L in layers:
+        flat = L["flat"]
+        if len(flat) != total:
+            print(f"warning: layer {L['idx']} ({L['name']}) has {len(flat)} keys, expected {total}",
+                  file=sys.stderr)
+            flat = (flat + ["&none"] * total)[:total]
+            L["raw"] = (L["raw"] + ["KC_NO"] * total)[:total]
+        L["flat"], it = flat, iter(flat)
+        L["rows"] = [[next(it) for _ in range(n)] for n in row_lens]
+
+    # --- combos: COMBO(name, result) with `name[] = {KC_A, KC_B, COMBO_END}`; keys are keycodes in
+    # QMK, so they are looked up on the base layer to get key positions
+    seqs = {}
+    for m in re.finditer(r"\b(\w+)\s*\[\s*\]\s*=\s*\{([^}]*)\}", body_text):
+        parts = [p for p in qmk_args(qmk_expand(m.group(2), objs, funcs)) if p]
+        if parts and parts[-1] in ("COMBO_END", "0"):
+            seqs[m.group(1)] = parts[:-1]
+    base_raw = [re.sub(r"\s+", "", t) for t in layers[0]["raw"]]
+
+    def base_of(t):
+        """The plain keycode a key sends when tapped: LT(1,KC_A) / LGUI_T(KC_A) -> KC_A"""
+        m = re.fullmatch(r"(\w+)\((.*)\)", t)
+        if not m:
+            return t
+        a = qmk_args(m.group(2))
+        if m.group(1) in ("LT", "MT") and len(a) == 2:
+            return base_of(a[1])
+        if m.group(1) in _QK_MT and len(a) == 1:
+            return base_of(a[0])
+        return t
+
+    def position_of(kc):
+        kc = re.sub(r"\s+", "", kc)
+        for i, t in enumerate(base_raw):
+            if t == kc:
+                return i
+        for i, t in enumerate(base_raw):
+            if base_of(t) == base_of(kc):
+                return i
+        return None
+
+    combos = []
+    for m in re.finditer(r"\b(COMBO|COMB)\s*\(", body_text):
+        inner, _ = qmk_inner(body_text, m.end() - 1)
+        a = qmk_args(qmk_expand(inner, objs, funcs))
+        if m.group(1) == "COMBO" and len(a) == 2 and a[0] in seqs:
+            name, result, kcs = a[0], a[1], seqs[a[0]]
+        elif m.group(1) == "COMB" and len(a) >= 3:          # combos.def style: COMB(name, result, KC_A, KC_B)
+            name, result, kcs = a[0], a[1], a[2:]
+        else:
+            continue
+        pos = [position_of(k) for k in kcs]
+        if not pos or any(p is None for p in pos) or len(set(pos)) != len(pos):
+            print(f"warning: combo {name}: its keys are not all on the base layer, so it is left out",
+                  file=sys.stderr)
+            continue
+        nm = re.sub(r"^(?:COMBO_|CMB_|C_)", "", name)
+        combos.append({"name": nm, "positions": pos, "binding": keys.binding(result),
+                       "layers": None, "timeout": None})
+
+    # --- tri-layer: update_tri_layer_state(state, _LOWER, _RAISE, _ADJUST) = conditional layer
+    for m in re.finditer(r"\bupdate_tri_layer(?:_state)?\s*\(\s*(?:\w+\s*,\s*)?(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\)",
+                         body_text):
+        a, b, c = (layer_ref(x) for x in m.groups())
+        rule = {"name": "tri", "ifs": [a, b], "then": c}
+        if None not in (a, b, c) and rule not in CONDITIONAL:     # it is often called more than once
+            CONDITIONAL.append(rule)
+    defines = {r["tok"].strip(): i for i, r in enumerate(raw_layers) if re.fullmatch(r"\w+", r["tok"].strip())}
+    return layers, combos, row_lens, defines
+
+
+# --------------------------------------------------------------------------- page 2 for QMK: the original code
+def source_page(text, src_name):
+    """The keymap.c exactly as it is (comments included), dimmed comments, in as many columns as
+    needed to keep the page a sane height."""
+    th, PM, fs = TH, 50, 15
+    LH = fs * 1.4
+    lines = []
+    for l in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        l = l.replace("\t", "    ").rstrip()
+        lines.append("".join(ch if 32 <= ord(ch) < 256 else ("?" if ord(ch) >= 256 else " ") for ch in l))
+    while lines and not lines[-1]:
+        lines.pop()
+    per_col = max(40, int((9000 - 2 * PM - 130) / LH))
+    ncols = max(1, -(-len(lines) // per_col))
+    per_col = -(-len(lines) // ncols)
+    cw = max(len(l) for l in lines) * 0.6 * fs + 60
+    PW = max(1500, ncols * cw + 2 * PM - 60)
+    PH = PM + 130 + per_col * LH + PM
+    c = Canvas(PW, PH, bg=th["bg"])
+    c.text(PM, PM + 34, src_name, 44, th["title"])
+    c.text(PM, PM + 66, "keymap source, original code (comments kept)", 19, th["sub"])
+    CM, CHW = "#7d8590", 0.6 * fs
+    in_block = False
+    for n, l in enumerate(lines):
+        col, row = divmod(n, per_col)
+        x, y = PM + col * cw, PM + 120 + row * LH + fs
+        code, cmt = l, ""
+        if in_block:
+            code, cmt = "", l
+            if "*/" in l:
+                in_block = False
+                k = l.index("*/") + 2
+                cmt, code = l[:k], l[k:]
+        else:
+            k = len(l)
+            for mm in re.finditer(r"//|/\*", l):
+                if l[:mm.start()].count('"') % 2 == 0:
+                    k = mm.start()
+                    break
+            code, cmt = l[:k], l[k:]
+            if cmt.startswith("/*") and "*/" not in cmt:
+                in_block = True
+        s = code.strip()
+        if s.startswith("#"):
+            colr, font = "#c3a6ff", "mono"
+        elif re.search(r"\[[^\]]+\]\s*=\s*\w+\s*\($", s) or re.search(r"\bkeymaps\b", s):
+            colr, font = "#8ab4ff", "monob"
+        else:
+            colr, font = "#ececec", "mono"
+        if code.strip():
+            c.text(x, y, code, fs, colr, font)
+        if cmt:
+            c.text(x + len(code) * CHW, y, cmt, fs, CM, "mono")
+    return c
+
+
 # --------------------------------------------------------------------------- page 2: keymap text
 def align_rows(rows):
     """Rows of bindings -> aligned text lines (same grid as the keyboard halves)."""
@@ -2139,24 +2941,51 @@ def find_keymap(config, arg):
             if p.is_file():
                 return p
             raise SystemExit(f"error: no keymap file at {p}")
-        # a plain name: it is looked for in the config folder and nowhere else
-        for cand in (config / p.name, config / (p.stem + ".keymap")):
+        # a plain name: it is looked for in the config folder first ...
+        for cand in (config / p.name, config / (p.stem + ".keymap"), config / (p.stem + ".c")):
             if cand.is_file():
                 return cand
+        # ... and then in the current folder, where a QMK keymap.c usually is
+        here = Path.cwd() / p.name
+        if here.is_file():
+            return here
         raise SystemExit(f"error: no keymap file {arg!r} in {config}")
-    found = sorted(config.glob("*.keymap"))
+    # no name: the folder has to hold exactly one keymap file (.keymap for ZMK, else .c for QMK)
+    for folder in (config, Path.cwd()):
+        found = sorted(folder.glob("*.keymap")) or sorted(folder.glob("*.c"))
+        if found:
+            break
     if not found:
-        raise SystemExit(f"error: no .keymap file in {config}")
+        raise SystemExit(f"error: no .keymap or .c file in {config}")
     if len(found) > 1:
         names = ", ".join(f.name for f in found)
-        raise SystemExit(f"error: {config} holds more than one keymap ({names}); "
+        raise SystemExit(f"error: {folder} holds more than one keymap ({names}); "
                          f"say which one to use")
     return found[0]
 
 
+def detect_format(path, text):
+    """'qmk' for a keymap.c, 'zmk' for a .keymap (decided by the file ending, else by what is inside)."""
+    ext = path.suffix.lower()
+    if ext == ".keymap":
+        return "zmk"
+    if ext in (".c", ".h"):
+        return "qmk"
+    if re.search(r"\bkeymaps\s*\[", text) and re.search(r"\bKC_\w+|\bLAYOUT\w*\s*\(", text):
+        return "qmk"
+    return "zmk"
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Draw a ZMK keymap as a 2-page PDF: layer flow chart + keymap text.")
-    ap.add_argument("keymap", nargs="?", help="name of the keymap file inside the config folder")
+    ap = argparse.ArgumentParser(description="Draw a ZMK .keymap or a QMK keymap.c as a 2-page PDF: "
+                                             "layer flow chart + keymap text.")
+    ap.add_argument("keymap", nargs="?",
+                    help="the ONE keymap file: a ZMK .keymap or a QMK keymap.c (looked for in the config folder, "
+                         "then in the current folder)")
+    ap.add_argument("--format", choices=("auto", "zmk", "qmk"), default="auto",
+                    help="zmk or qmk (default: auto - .keymap is ZMK, .c is QMK)")
+    ap.add_argument("--split", choices=("auto", "yes", "no"), default="auto",
+                    help="QMK only: draw the keyboard as two halves with a gap (yes) or as one block (no)")
     ap.add_argument("-o", "--output", help="output PDF (default: <keymap>.pdf in the current folder)")
     ap.add_argument("--config", default="config",
                     help="folder the keymap file is in (default: config)")
@@ -2172,16 +3001,24 @@ def main():
     path = find_keymap(config, a.keymap)
     text = path.read_text(encoding="utf-8", errors="replace")
     rows = [int(x) for x in a.rows.split(",")] if a.rows else None
-    layers, combos, row_lens, defines = parse_keymap(text, rows)
+    fmt = detect_format(path, text) if a.format == "auto" else a.format
+    if fmt == "qmk":
+        layers, combos, row_lens, defines = parse_qmk(
+            text, rows, {"auto": None, "yes": True, "no": False}[a.split])
+    else:
+        layers, combos, row_lens, defines = parse_keymap(text, rows, base_dir=path.parent)
     # the PDF and the copies of it go in the folder the command is run from, not
     # in the config folder with the keymap
     out = Path(a.output) if a.output else Path.cwd() / (path.stem + ".pdf")
-    pages = [flow_page(layers, combos, row_lens, defines, path.name),
-             text_page(keymap_text(text, sum(row_lens)), path.name)]
+    if fmt == "qmk":                      # page 2 is the keymap.c as it is, comments and all
+        pages = [flow_page(layers, combos, row_lens, defines, path.name), source_page(text, path.name)]
+    else:
+        pages = [flow_page(layers, combos, row_lens, defines, path.name),
+                 text_page(keymap_text(text, sum(row_lens)), path.name)]
     data = build_pdf(pages, path.name)
     folder, png = save_outputs(data, out, path.name,
                                archive=not a.no_archive, scale=a.preview_scale)
-    print(f"{path.name}: {len(layers)} layers, {sum(row_lens)} keys {row_lens}, {len(combos)} combos")
+    print(f"{path.name} ({fmt.upper()}): {len(layers)} layers, {sum(row_lens)} keys {row_lens}, {len(combos)} combos")
     print(f"read {path}")
     print(f"wrote {out}")
     if folder is not None:
