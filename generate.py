@@ -1421,7 +1421,8 @@ def flow_page(layers, combos, row_lens, defines, src_name):
                     break
         if not improved:
             break
-    depth = col_of
+    used = sorted(set(col_of.values()))         # moving layers may have emptied a column: close the gap
+    depth = {i: used.index(c) for i, c in col_of.items()}
 
     cols = defaultdict(list)
     for L in layers:
@@ -3017,6 +3018,9 @@ def main():
             text, rows, {"auto": None, "yes": True, "no": False}[a.split])
     else:
         layers, combos, row_lens, defines = parse_keymap(text, rows, base_dir=path.parent)
+    if not layers:                        # nothing to draw: say so and write nothing
+        print(f"{path.name}: no layers found, nothing written", file=sys.stderr)
+        sys.exit(1)
     # the PDF and the copies of it go in the folder the command is run from, not
     # in the config folder with the keymap
     out = Path(a.output) if a.output else Path.cwd() / (path.stem + ".pdf")
