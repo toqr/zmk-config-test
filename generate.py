@@ -1146,6 +1146,16 @@ def draw_key(c, x, y, ks, b, layers, defines, th, state=None, part="both"):
 MONOBLOCK = False               # True for a QMK keyboard that is one block of keys (no gap between halves)
 
 
+def key_slot(row, nrows, i, left, n, M):
+    """Column slot (0 .. 2M-1) of key i in a row of n keys whose left half has `left` keys.
+    Every row but the last is aligned to the outer edges, so the two halves mirror each other and a row
+    with extra inner keys (the 3rd row of a Kyria) sticks out toward the middle. The last row is the thumb
+    cluster: it stays centred around the middle."""
+    if row < nrows - 1:
+        return i if i < left else 2 * M - (n - left) + (i - left)
+    return (M - left + i) if i < left else (M + i - left)
+
+
 class Board:
     """Split keyboard: left/right halves, short bottom row sits under the inner columns."""
 
@@ -1163,7 +1173,7 @@ class Board:
         for r, n in enumerate(row_lens):
             left = lefts[r]
             for i in range(n):
-                slot = (M - left + i) if i < left else (M + i - left)
+                slot = key_slot(r, len(row_lens), i, left, n, M)
                 self.cells.append((slot * (ks + gap) + (split if i >= left else 0), r * (ks + gap)))
         self.w = 2 * M * (ks + gap) - gap + split
         self.h = len(row_lens) * (ks + gap) - gap
@@ -2764,7 +2774,7 @@ def align_rows(rows):
         left = lefts[k]
         cells = [""] * (2 * M)
         for i, b in enumerate(r):
-            cells[(M - left + i) if i < left else (M + i - left)] = b
+            cells[key_slot(k, len(rows), i, left, len(r), M)] = b
         grid.append(cells)
     widths = [max(len(g[k]) for g in grid) for k in range(2 * M)]
     lines = []
