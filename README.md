@@ -9,5 +9,5 @@ edit directly from keymap file, with flowchart below (click below)<br><br>
 ## known limitations and assumptions for generate.py
 - does not work with qmk
 - keymaps with large key clusters are not displayed well
-- parser depends on newlines for next row -> file keymap must use standard layout (ie 5 keys left, 5 keys right, \n...)
+- parser depends on newlines for next row -> keymap must use standard layout (ie 5 keys left, 5 keys right, \n...)
 - qmk can be unibody / variable names may not be reliable -> assume it will always be a symmetric split or fails
