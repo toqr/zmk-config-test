@@ -422,11 +422,23 @@ def parse_keymap(text, forced_rows=None, base_dir=None):
     ROW_LEFTS = None
     if forced_rows:
         row_lens = forced_rows
+        QMK_INFO[:] = ["rows given with --rows"]
     else:
         first = [len(l) for l in layers[0]["lines"]]
-        row_lens = first if len(first) > 1 else guess_rows(len(layers[0]["flat"]))
-        if len(first) > 1 and lefts0 and any(k is not None for k in lefts0):
+        has_marks = bool(lefts0 and any(k is not None for k in lefts0))
+        if len(first) > 1 and has_marks:                # medium: halves marked with /* */ in the file
+            row_lens = first
             ROW_LEFTS = [k if k is not None else n // 2 for k, n in zip(lefts0, row_lens)]
+            QMK_INFO[:] = ["medium", "from the line breaks and the /* */ markers in the file"]
+        elif len(first) >= 6 and qmk_pair_halves(first) and first[-1] < first[0] and len(set(first[:-2])) == 1:
+            row_lens, ROW_LEFTS = qmk_pair_halves(first)  # medium: lines come in equal pairs (left, right half)
+            QMK_INFO[:] = ["medium", "lines come in equal pairs (left half, right half), with a shorter last pair"]
+        elif len(first) > 1:                            # medium: the rows as they are written
+            row_lens = first
+            QMK_INFO[:] = ["medium", "from the line breaks in the file"]
+        else:                                           # low: only the number of keys is known
+            row_lens = guess_rows(len(layers[0]["flat"]))
+            QMK_INFO[:] = ["low", f"guessed from the number of keys ({len(layers[0]['flat'])}); use --rows to set it"]
     total = sum(row_lens)
     for L in layers:
         flat = L["flat"]
@@ -2487,6 +2499,38 @@ def qmk_rows(n, breaks, marks):
     return lens, lefts
 
 
+QMK_INFO = []          # [confidence, why] of the rows/halves of the last QMK keymap
+
+
+def qmk_name_geometry(layout_name, n):
+    """How sure can we be of the rows? The best signal is the layout macro itself: LAYOUT_split_3x5_2 is
+    3 rows of 5 keys per half and 2 thumb keys per half; LAYOUT_ortho_4x12 is 4 rows of 12. It is only
+    believed when the number of keys in the layer is exactly what the name says.
+    -> (row lengths, left-half sizes or None, is split) or None"""
+    m = re.search(r"(?<!\d)(\d{1,2})x(\d{1,2})(?:_(\d{1,2}))?(?!\d)", layout_name)
+    if not m:
+        return None
+    rows, per, thumb = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+    split = "split" in layout_name.lower()
+    if split:
+        lens = [2 * per] * rows + ([2 * thumb] if thumb else [])
+        lefts = [per] * rows + ([thumb] if thumb else [])
+    else:
+        lens = [per] * rows + ([thumb] if thumb else [])
+        lefts = None
+    if rows < 1 or per < 1 or sum(lens) != n:
+        return None
+    return lens, lefts, split
+
+
+def qmk_pair_halves(lens):
+    """A split keymap written with the left half on one line and the right half on the next:
+    5,5, 5,5, 5,5, 2,2 -> rows of 10,10,10,4. -> (row lengths, left sizes) or None"""
+    if len(lens) < 4 or len(lens) % 2 or any(a != b for a, b in zip(lens[::2], lens[1::2])):
+        return None
+    return [2 * a for a in lens[::2]], list(lens[::2])
+
+
 def qmk_find_array(text):
     """The text inside `keymaps[][..][..] = { ... };`"""
     m = re.search(r"\bkeymaps\s*(?:\[[^\]]*\]\s*)+=\s*\{", text)
@@ -2626,15 +2670,40 @@ def parse_qmk(text, forced_rows=None, split=None):
 
     # --- rows and halves
     first = [len(l) for l in layers[0]["lines"]]
+    layout0, n0 = raw_layers[0]["layout"], len(layers[0]["flat"])
+    has_marks = bool(lefts0 and any(k is not None for k in lefts0))
+    name_split = qmk_wants_split(layout0, first, False) and not has_marks
+    geo, pair, lefts_geo = qmk_name_geometry(layout0, n0), None, None
     if forced_rows:
-        row_lens = forced_rows
+        row_lens, QMK_INFO[:] = forced_rows, ["rows given with --rows"]
+    elif geo:                                           # high: the layout name says so
+        row_lens, lefts_geo = geo[0], geo[1]
+        QMK_INFO[:] = ["high", f"from the layout name {layout0}"]
+    elif has_marks and len(first) > 1:                  # medium: halves marked with /* */ in the file
+        row_lens = first
+        QMK_INFO[:] = ["medium", "from the line breaks and the /* */ markers in the file"]
+    elif len(first) > 1 and name_split and qmk_pair_halves(first):
+        row_lens, lefts_geo = qmk_pair_halves(first)    # medium: left half and right half on separate lines
+        QMK_INFO[:] = ["medium", "each line is one half of a row, so two lines were joined"]
+    elif len(first) >= 6 and qmk_pair_halves(first) and first[-1] < first[0] and len(set(first[:-2])) == 1:
+        row_lens, lefts_geo = qmk_pair_halves(first)    # medium: unknown name, but the lines come in equal pairs
+        QMK_INFO[:] = ["medium", "lines come in equal pairs (left half, right half), with a shorter last pair"]
+        name_split = True
+    elif len(first) > 1:                                # medium: the rows as they are written
+        row_lens = first
+        QMK_INFO[:] = ["medium", "from the line breaks in the file"]
+    else:                                               # low: only the number of keys is known
+        row_lens = guess_rows(n0)
+        QMK_INFO[:] = ["low", f"guessed from the number of keys ({n0}); use --rows to set it"]
+    if geo and split is None:
+        is_split = geo[2]
     else:
-        row_lens = first if len(first) > 1 else guess_rows(len(layers[0]["flat"]))
-    is_split = split if split is not None else qmk_wants_split(
-        raw_layers[0]["layout"], row_lens, bool(lefts0 and any(k is not None for k in lefts0)))
+        is_split = split if split is not None else qmk_wants_split(layout0, row_lens, has_marks or bool(lefts_geo))
     ROW_LEFTS = None
     MONOBLOCK = not is_split
-    if is_split and not forced_rows and len(first) > 1 and lefts0 and any(k is not None for k in lefts0):
+    if is_split and not forced_rows and lefts_geo:
+        ROW_LEFTS = list(lefts_geo)
+    elif is_split and not forced_rows and len(first) > 1 and has_marks:
         ROW_LEFTS = [k if k is not None else n // 2 for k, n in zip(lefts0, row_lens)]
     total = sum(row_lens)
     for L in layers:
@@ -3033,6 +3102,8 @@ def main():
     folder, png = save_outputs(data, out, path.name,
                                archive=not a.no_archive, scale=a.preview_scale)
     print(f"{path.name} ({fmt.upper()}): {len(layers)} layers, {sum(row_lens)} keys {row_lens}, {len(combos)} combos")
+    if QMK_INFO:
+        print("layout: " + (f"{QMK_INFO[0]} confidence, {QMK_INFO[1]}" if len(QMK_INFO) > 1 else QMK_INFO[0]))
     print(f"read {path}")
     print(f"wrote {out}")
     if folder is not None:
