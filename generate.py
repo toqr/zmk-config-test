@@ -2778,8 +2778,60 @@ def parse_qmk(text, forced_rows=None, split=None):
 
 
 # --------------------------------------------------------------------------- page 2 for QMK: the original code
+def strip_c_comments(text):
+    """C source without its comments: // and /* */ (also over several lines) are removed, markers inside
+    "strings" and 'chars' are left alone, a line that held only a comment is dropped altogether, and runs
+    of blank lines shrink to one."""
+    out, in_block = [], False
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        res, i, q, n = [], 0, "", len(line)
+        while i < n:
+            ch = line[i]
+            if in_block:
+                j = line.find("*/", i)
+                if j < 0:
+                    i = n
+                else:
+                    in_block, i = False, j + 2
+            elif q:
+                res.append(ch)
+                if ch == "\\" and i + 1 < n:
+                    res.append(line[i + 1])
+                    i += 1
+                elif ch == q:
+                    q = ""
+                i += 1
+            elif ch in "\"'":
+                q = ch
+                res.append(ch)
+                i += 1
+            elif line.startswith("//", i):
+                i = n
+            elif line.startswith("/*", i):
+                in_block, i = True, i + 2
+            else:
+                res.append(ch)
+                i += 1
+        code = "".join(res).rstrip()
+        if line.strip() and not code.strip():
+            continue                                    # the line was nothing but a comment
+        out.append(code)
+    lines, blank = [], True
+    for l in out:
+        if not l.strip():
+            if not blank:
+                lines.append("")
+            blank = True
+        else:
+            lines.append(l)
+            blank = False
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
 def source_page(text, src_name):
-    """The keymap.c exactly as it is (comments included), dimmed comments, in as many columns as
+    """The keymap.c (comments already removed by the caller), in as many columns as
     needed to keep the page a sane height."""
     th, PM, fs = TH, 50, 15
     LH = fs * 1.4
@@ -2797,7 +2849,7 @@ def source_page(text, src_name):
     PH = PM + 130 + per_col * LH + PM
     c = Canvas(PW, PH, bg=th["bg"])
     c.text(PM, PM + 34, src_name, 44, th["title"])
-    c.text(PM, PM + 66, "keymap source, original code (comments kept)", 19, th["sub"])
+    c.text(PM, PM + 66, "keymap source, comments removed", 19, th["sub"])
     CM, CHW = "#7d8590", 0.6 * fs
     in_block = False
     for n, l in enumerate(lines):
@@ -3094,7 +3146,7 @@ def main():
     # in the config folder with the keymap
     out = Path(a.output) if a.output else Path.cwd() / (path.stem + ".pdf")
     if fmt == "qmk":                      # page 2 is the keymap.c as it is, comments and all
-        pages = [flow_page(layers, combos, row_lens, defines, path.name), source_page(text, path.name)]
+        pages = [flow_page(layers, combos, row_lens, defines, path.name), source_page(strip_c_comments(text), path.name)]
     else:
         pages = [flow_page(layers, combos, row_lens, defines, path.name),
                  text_page(keymap_text(text, sum(row_lens)), path.name)]
