@@ -6,7 +6,8 @@ zmk_visualizer.py - turn a ZMK .keymap or a QMK keymap.c into a 2-page PDF.
     python3 zmk_visualizer.py keymap.c                  # QMK:  writes keymap.pdf
     python3 zmk_visualizer.py keymap.c --split no       # QMK board that is one block of keys (no gap in the middle)
     python3 zmk_visualizer.py my.keymap -o out.pdf --open
-    python3 zmk_visualizer.py my.keymap --2rows 10,10,10,4   # only if the key rows can't be detected
+    python3 zmk_visualizer.py my.keymap --rows 10,10,10,4   # only if the key rows can't be detected
+    python3 zmk_visualizer.py keymap.c --no-video       # skip the video (see below)
 
 Give ONE file: a ZMK .keymap or a QMK keymap.c. The kind is taken from the file ending (.keymap = ZMK,
 .c = QMK; --format overrides it). The file is looked for in the "config" folder (then in the current
@@ -56,7 +57,7 @@ Page 1 - FLOW CHART. Every layer is a node, placed left to right by how many ste
          A "how to read" panel explains the colours. Combos are drawn at the bottom as mini
          keyboards (red = keys pressed together).
 Page 2 - ZMK: the whole keymap as text, with every comment removed.
-         QMK: the original keymap.c, exactly as it is (comments kept, dimmed).
+         QMK: the keymap.c as it is, with its comments removed.
 
 QMK keymaps: the layers come from `keymaps[]` (LAYOUT(...) macros or a raw matrix) and are named after
 the layer enum / #defines. Understood: KC_* keycodes, MO / TG / TO / OSL / TT / DF / LM / LT, mod-taps
@@ -65,13 +66,28 @@ the layer enum / #defines. Understood: KC_* keycodes, MO / TG / TO / OSL / TT / 
 (keys are looked up on the base layer) and update_tri_layer_state(), which is drawn like a ZMK
 conditional layer. The result goes through the same drawing code as a ZMK keymap.
 
-Standard library only. Comments in the .keymap (including boxed/aligned ones) are ignored.
+VIDEO: every run also writes video/<keyboard>-<date>.mp4 (a folder called video next to the PDF), a 60 FPS H.264
+video of the flow chart being drawn. The arrows are drawn one after the other,
+following the connections: first the arrows that leave the base layer, then - as soon as a layer has been
+reached - the arrows that leave that layer. Every arrow follows its exact path from the key that triggers it to
+the layer it leads to, with its own colour, width, dashes, rounded corners and label; the chart itself is never
+redrawn (the video reveals pixels of the normal render), and the last frame is the finished chart as it is in the
+PDF. The video is 3840 px wide with the aspect ratio of the page, 8-9 seconds long, and under 2 MB. It takes about
+30 seconds; use --no-video to skip it. When numpy, scipy, Pillow, pdftoppm or ffmpeg is missing the PDF is still
+written and the video is skipped with a note.
+
+Standard library only for the PDF (the video also needs numpy, scipy, Pillow, pdftoppm and ffmpeg).
+Comments in the .keymap (including boxed/aligned ones) are ignored.
 """
 import argparse
+import copy
 import itertools
 import math
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import webbrowser
 import zlib
 from collections import defaultdict, deque
@@ -365,6 +381,7 @@ def zmk_helpers(clean):
 
 
 CONDITIONAL = []   # conditional layers: [{"name", "ifs": [layers], "then": layer}]
+LEADER = {"keys": set(), "seqs": []}   # QMK leader key: keycode names, and [{"seq": "L Q", "kind", "layer"}]
 BEH = {}        # behaviours defined in the file: label -> {"compat", "bindings", "mode"}
 
 
@@ -468,6 +485,7 @@ def parse_keymap(text, forced_rows=None, base_dir=None):
                        "layers": [int(x) for x in re.findall(r"-?\d+", ly.group(1)) if int(x) >= 0] if ly else None,
                        "timeout": int(to.group(1)) if to else None})
     CONDITIONAL.clear()
+    LEADER["keys"], LEADER["seqs"] = set(), []
     cl_body = find_node(root, "conditional_layers")
     for header, body in (parse_nodes(cl_body) if cl_body else []):
         ifs = re.search(r"if-layers\s*=\s*<([^>]*)>", body)
@@ -688,6 +706,19 @@ def build_edges(layers, combos, defines):
         for src in (c["layers"] if c["layers"] else [0]):
             if src != dst and 0 <= src < n:
                 grouped.setdefault((src, dst, kind, "combo", c["name"]), pos)
+    # QMK leader key: LEADER, then a key sequence, changes the layer. The arrow starts on the LEADER key(s)
+    if LEADER["seqs"]:
+        for L in layers:
+            raw = L.get("raw") or []
+            lpos = [p for p, t in enumerate(raw) if str(t).strip() in LEADER["keys"]]
+            if not lpos:
+                continue
+            for sq in LEADER["seqs"]:
+                dst = sq["layer"]
+                if not (0 <= dst < n) or dst == L["idx"]:
+                    continue
+                kind = "switch" if sq["kind"] == "to" else "toggle"
+                grouped.setdefault((L["idx"], dst, kind, "leader", sq["seq"]), lpos)
     edges = []
     for (src, dst, kind, via, name), pos in grouped.items():
         edges.append({"id": f"e{len(edges)}", "src": src, "dst": dst, "kind": kind,
@@ -1358,6 +1389,9 @@ def shade(hexc, f):
     return "#%02x%02x%02x" % (r, g, b)
 
 
+FLOW_TRACE = None          # set to {"edges": [], "labels": []} to record where every arrow and label is drawn (animation)
+
+
 def flow_page(layers, combos, row_lens, defines, src_name):
     th = TH
     # combos that type a key sit between the keys on the layers they work on; only the combos that
@@ -2013,12 +2047,19 @@ def flow_page(layers, combos, row_lens, defines, src_name):
     # ---- 3. key shapes (red = held to be on this layer, pink = a key that switches layers)
     held_by = {i: held_positions(i, prev) for i in ids}
 
+    lead_pos = defaultdict(set)                      # QMK leader keys start arrows too
+    for e in edges:
+        if e["via"] == "leader":
+            lead_pos[e["src"]].update(e["positions"])
+
     def kstate(L, k):
         if k in held_by[L["idx"]]:
             return "held"
         b = L["flat"][k]
         if is_toggle_key(b) and layer_action(b, defines):
             return "toggle"
+        if k in lead_pos.get(L["idx"], ()):
+            return "layer"
         return "layer" if layer_action(b, defines) else None
 
     def kpos(i, k):
@@ -2036,6 +2077,7 @@ def flow_page(layers, combos, row_lens, defines, src_name):
     for d in R.values():
         e, col = d["e"], d["col"]
         dash = None if e["kind"] in HELD_KINDS else (26, 16)
+        _op0 = len(c.ops)
         run = []
         for seg in zip(d["pts"], d["pts"][1:]):
             if any(_seg_hits_rect(seg, r) for r in card_rects):
@@ -2053,6 +2095,12 @@ def flow_page(layers, combos, row_lens, defines, src_name):
         arrow_head(c, d["end"][0], d["end"][1], d["dir"], col, HEAD_SZ)
         for tx, ty in d["dots"]:                  # the key(s) that trigger this arrow
             c.circle(tx, ty, DOT_SZ, fill=col, stroke=th["card"], sw=5)
+        if FLOW_TRACE is not None:
+            FLOW_TRACE["edges"].append({"id": e["id"], "src": e["src"], "dst": e["dst"], "kind": e["kind"],
+                                        "col": col, "dash": dash, "pts": d["pts"], "joins": d["joins"],
+                                        "dots": d["dots"], "end": d["end"], "dir": d["dir"], "rad": d["rad"],
+                                        "ops": (_op0, len(c.ops)), "SW": SW, "CASE": CASE, "HEAD": HEAD_SZ,
+                                        "DOT": DOT_SZ, "page": (c.w, c.h)})
 
     # ---- 5. key labels, on top of the arrows
     for L in layers:
@@ -2096,6 +2144,8 @@ def flow_page(layers, combos, row_lens, defines, src_name):
         txt = ("combo " if e["via"] == "combo" else "") + KIND_WORD[e["kind"]]
         if e["via"] == "cond":
             txt = f"layers {e['name']} on"
+        elif e["via"] == "leader":
+            txt = f"leader {e['name']}"
         w, h = tw(txt, 24) + 32, 50
         pts = d["pts"]
         cands = []
@@ -2123,8 +2173,11 @@ def flow_page(layers, combos, row_lens, defines, src_name):
                 ax, ay = cand
                 break
         lbl_boxes.append((ax - w / 2, ay - h / 2, ax + w / 2, ay + h / 2))
+        _l0 = len(c.ops)
         c.rect(ax - w / 2, ay - h / 2, w, h, fill=th["bg"], stroke=col, sw=3.5, r=h / 2)
         c.text(ax, ay + 8.5, txt, 24, col, anchor="middle")
+        if FLOW_TRACE is not None:
+            FLOW_TRACE["labels"].append({"id": e["id"], "box": (ax - w / 2, ay - h / 2, w, h), "ops": (_l0, len(c.ops))})
 
     # ---- 7. combos
     if combos:
@@ -2566,6 +2619,71 @@ def qmk_custom_layer_keys(text, layer_ref):
             out[name] = (pick[0], layer_ref(pick[1]))
     return out
 
+_LEADER_NAMES = {"QK_LEAD", "QK_LEADER", "KC_LEAD", "KC_LEAD", "QK_LDR", "LEADER", "LDR", "KC_LEADER"}
+
+
+def qmk_leader_label(tok):
+    t = tok.strip()
+    t = re.sub(r"^(?:KC_|QK_)", "", t)
+    names = {"SPC": "Space", "SPACE": "Space", "ENT": "Enter", "ENTER": "Enter", "TAB": "Tab", "ESC": "Esc",
+             "COMM": ",", "DOT": ".", "SLSH": "/", "MINS": "-", "EQL": "=", "SCLN": ";", "QUOT": "'"}
+    return names.get(t, t)
+
+
+def qmk_layer_effect(chunk, layer_ref):
+    """What a piece of code does to the layers -> ("to" | "tog" | "mo", layer index) or None."""
+    pats = [("to", r"\b(?:layer_move|set_single_persistent_default_layer|default_layer_set)\s*\(\s*(\w+)\s*\)"),
+            ("tog", r"\b(?:layer_invert|layer_on)\s*\(\s*(\w+)\s*\)")]
+    for kind, rx in pats:
+        m = re.search(rx, chunk)
+        if m and layer_ref(m.group(1)) is not None:
+            return kind, layer_ref(m.group(1))
+    return None
+
+
+def qmk_leader_sequences(text, layer_ref):
+    """Leader-key sequences that change layers -> (names of the leader keycodes, [{"seq", "kind", "layer"}]).
+    Understands the function-pointer style (`case KC_L: return leader_layers_func;`) and
+    QMK's own leader_sequence_two_keys(KC_L, KC_Q) / SEQ_TWO_KEYS(KC_L, KC_Q) blocks."""
+    keys = set()
+    for m in re.finditer(r"\bcase\s+(\w+)\s*:(?:(?!\bcase\b|\bbreak\b)[^}]){0,200}?\bstart_leading\s*\(", text, re.S):
+        keys.add(m.group(1))
+    seqs = []
+    funcs = {}
+    for m in re.finditer(r"\bvoid\s*\*\s*(\w+)\s*\(\s*uint16_t\s+\w+\s*\)\s*\{", text):
+        funcs[m.group(1)] = qmk_inner(text, m.end() - 1)[0]
+    if funcs:
+        called = set()
+        for body in funcs.values():
+            called.update(re.findall(r"\breturn\s+(\w+)\s*;", body))
+        roots = [f for f in funcs if f not in called] or []
+
+        def walk(fn, prefix, seen):
+            if fn in seen:
+                return
+            body = funcs[fn]
+            parts = re.split(r"\bcase\s+(\w+)\s*:", body)
+            for name, chunk in zip(parts[1::2], parts[2::2]):
+                label = (prefix + " " + qmk_leader_label(name)).strip()
+                nxt = [f for f in re.findall(r"\breturn\s+(\w+)\s*;", chunk) if f in funcs]
+                if nxt:
+                    walk(nxt[0], label, seen | {fn})
+                    continue
+                eff = qmk_layer_effect(chunk, layer_ref)
+                if eff:
+                    seqs.append({"seq": label, "kind": eff[0], "layer": eff[1]})
+        for r in roots:
+            walk(r, "", set())
+    # QMK's own leader: leader_end_user() { if (leader_sequence_two_keys(KC_L, KC_Q)) { layer_move(_QWERTY); } }
+    for m in re.finditer(r"\b(?:leader_sequence_\w+?_keys|SEQ_\w+?_KEYS)\s*\(([^)]*)\)\s*\)?\s*\{", text):
+        eff = qmk_layer_effect(qmk_inner(text, m.end() - 1)[0], layer_ref)
+        if eff:
+            seqs.append({"seq": " ".join(qmk_leader_label(a) for a in m.group(1).split(",") if a.strip()),
+                         "kind": eff[0], "layer": eff[1]})
+    if seqs:
+        keys |= _LEADER_NAMES
+    return keys, seqs
+
 
 QMK_SPLIT_BOARDS = ("kyria", "corne", "crkbd", "lily58", "sofle", "iris", "totem", "sweep", "ferris", "charybdis",
                     "cradio", "lotus", "dactyl", "imprint", "cantor", "reviung", "nyquist", "elora", "moonlander",
@@ -2607,6 +2725,7 @@ def parse_qmk(text, forced_rows=None, split=None, hint=""):
     BINDING_STARTS = set()
     BEH.clear()
     CONDITIONAL.clear()
+    LEADER["keys"], LEADER["seqs"] = set(), []
     QMK_TEXT.clear()
     _QMK_CODES.clear()
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -2683,6 +2802,11 @@ def parse_qmk(text, forced_rows=None, split=None, hint=""):
         return numidx.get(v) if v is not None else None
 
     custom = qmk_custom_layer_keys(body_text, layer_ref)
+    LEADER["keys"], LEADER["seqs"] = set(), []
+    try:
+        LEADER["keys"], LEADER["seqs"] = qmk_leader_sequences(body_text, layer_ref)
+    except Exception:
+        pass
     keys = QmkKeys(layer_ref, custom)
 
     layers, lefts0 = [], None
@@ -3061,6 +3185,24 @@ def text_page(lines, src_name):
 PREVIEW_MAX_PIXELS = 64_000_000
 
 
+def import_pymupdf():
+    """PyMuPDF, or None. It is imported as `pymupdf`; the old name `fitz` prints a FutureWarning, so it is only
+    a fallback for old versions, and its warning is silenced. A broken install counts as not installed."""
+    try:
+        import pymupdf
+        return pymupdf
+    except Exception:
+        pass
+    try:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            import fitz
+        return fitz
+    except Exception:
+        return None
+
+
 def snapshot_png(pdf_bytes, png_path, scale=2.0, max_pixels=PREVIEW_MAX_PIXELS):
     """Render page 1 of the PDF to a PNG, as a quick look at the flow chart.
 
@@ -3091,10 +3233,7 @@ def snapshot_png(pdf_bytes, png_path, scale=2.0, max_pixels=PREVIEW_MAX_PIXELS):
             if too_big > max_pixels:
                 scale = math.sqrt(max_pixels / too_big)
 
-    try:
-        import fitz
-    except ImportError:
-        fitz = None
+    fitz = import_pymupdf()
     if fitz is not None:
         document = fitz.open(stream=pdf_bytes, filetype="pdf")
         try:
@@ -3205,6 +3344,364 @@ def detect_format(path, text):
     return "zmk"
 
 
+# --------------------------------------------------------------------------- video
+# The flow chart drawn as a video: the arrows are drawn one after the other, each one following its own
+# path from the key that triggers it to the layer it leads to. Nothing in the chart is redrawn: the page is
+# rendered in layers (the chart without arrows, every arrow on its own, the labels) and the video only
+# reveals pixels of those renders, along the exact path of each arrow - so the colours, widths, dashes,
+# rounded corners and labels are the original ones. Needs numpy, PyMuPDF (or pdftoppm + Pillow) and ffmpeg
+# (libx264, e.g. from the imageio-ffmpeg package); they are only imported when a video is made, so the
+# PDF part stays standard library.
+np = Image = cKDTree = None
+
+
+VIDEO_FPS = 60
+VIDEO_HOLD_START, VIDEO_HOLD_END = 0.5, 1.0        # seconds of the bare chart before, and of the finished chart after
+VIDEO_DRAW_SECONDS = 7.0                     # all arrows are finished this long after the drawing starts
+VIDEO_STAGGER = 0.22                         # between arrows that leave the same layer
+VIDEO_SOFT = 5.0                             # softness of the drawing front, in page points
+VIDEO_MIN_DUR, VIDEO_MAX_DUR = 1.1, 3.2            # fewest / most seconds an arrow takes to be drawn
+
+
+
+VIDEO_FFMPEG = "ffmpeg"
+
+
+def _vid_imports():
+    """Load what the video needs. -> "" when all is there, else a message that says what to install.
+    Needed: numpy; PyMuPDF (or pdftoppm + Pillow) to render the chart; ffmpeg (a system one, or the one that comes
+    with the imageio-ffmpeg package). scipy is used when it is there (faster), but is not needed."""
+    global np, Image, cKDTree, VIDEO_FFMPEG
+    need, hint = [], []
+    try:
+        import numpy as np_
+        np = np_
+    except Exception:
+        need.append("numpy")
+    if import_pymupdf() is None:
+        try:
+            from PIL import Image as Image_
+            Image = Image_
+            if not shutil.which("pdftoppm"):
+                raise ImportError
+        except Exception:
+            need.append("pymupdf")
+    try:
+        from scipy.spatial import cKDTree as KD
+        cKDTree = KD
+    except Exception:
+        cKDTree = None
+    exe = shutil.which("ffmpeg")
+    if not exe:
+        try:
+            import imageio_ffmpeg
+            exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            need.append("imageio-ffmpeg")
+    VIDEO_FFMPEG = exe or "ffmpeg"
+    if need:
+        return ("it needs " + ", ".join(need) + ".\n  Install with:   " + Path(sys.executable).name
+                + " -m pip install " + " ".join(need) + ("\n  (for ffmpeg you can also use: brew install ffmpeg)"
+                                                         if "imageio-ffmpeg" in need else ""))
+    return ""
+
+
+def _vid_nearest(P, pt):
+    """For every point of pt (n,2): the distance to the nearest point of P (m,2) and the index of that point."""
+    if cKDTree is not None:
+        return cKDTree(P).query(pt)
+    d, idx = np.empty(len(pt)), np.empty(len(pt), int)
+    P32 = P.astype(np.float32)
+    for a in range(0, len(pt), 4000):                         # in pieces, to keep the memory small
+        q = pt[a:a + 4000].astype(np.float32)
+        dd = ((q[:, None, :] - P32[None, :, :]) ** 2).sum(axis=2)
+        idx[a:a + 4000] = dd.argmin(axis=1)
+        d[a:a + 4000] = np.sqrt(dd[np.arange(len(q)), idx[a:a + 4000]])
+    return d, idx
+
+
+def keyboard_name(path, text=""):
+    """The name used in the video file name: the file name without the usual filler words (old-kyria.c -> kyria,
+    cradio2.keymap -> cradio2); for a plain keymap.c it is the keyboard's folder in a QMK tree
+    (keyboards/planck/keymaps/me/keymap.c -> planck), else the folder the file is in."""
+    skip = ("keymap", "old", "new", "config")
+    words = [w for w in re.split(r"[^A-Za-z0-9]+", path.stem)
+             if w and w.lower() not in skip and not re.fullmatch(r"[0-9a-f]{8}", w.lower())]
+    if words:
+        return "-".join(words).lower()
+    folders = [p.name for p in path.resolve().parents]
+    if "keymaps" in folders and folders.index("keymaps") + 1 < len(folders):
+        return folders[folders.index("keymaps") + 1].lower()
+    return (folders[0] if folders and folders[0] not in ("config", "") else (folders[1] if len(folders) > 1 else "keyboard")).lower()
+
+
+def _vid_render_layers(page, trace, width, work):
+    """name -> numpy image. scene: no arrows, no labels. e<i>: scene + that arrow. alledges: all arrows, no labels.
+    full: the page as it is."""
+    edge_rng = [e["ops"] for e in trace["edges"]]
+    label_rng = [l["ops"] for l in trace["labels"]]
+    inside = lambda i, rngs: any(a <= i < b for a, b in rngs)
+    variants = {
+        "scene": lambda i: not inside(i, edge_rng) and not inside(i, label_rng),
+        "alledges": lambda i: not inside(i, label_rng),
+        "full": lambda i: True,
+    }
+    for k, rng in enumerate(edge_rng):
+        variants[f"e{k}"] = (lambda rng: lambda i: (not inside(i, edge_rng) and not inside(i, label_rng))
+                             or rng[0] <= i < rng[1])(rng)
+    mupdf = import_pymupdf()
+    procs, imgs = [], {}
+    for name, keep in variants.items():
+        v = copy.copy(page)
+        v.ops = [o for i, o in enumerate(page.ops) if keep(i)]
+        data = build_pdf([v], "chart")
+        if mupdf is not None:                                  # PyMuPDF: no files, no other program
+            doc = mupdf.open(stream=data, filetype="pdf")
+            try:
+                pg = doc[0]
+                sc = width / pg.rect.width
+                pix = pg.get_pixmap(matrix=mupdf.Matrix(sc, sc), alpha=False)
+                imgs[name] = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)[:, :, :3].copy()
+            finally:
+                doc.close()
+            continue
+        pdf = work / f"{name}.pdf"
+        pdf.write_bytes(data)
+        procs.append((name, subprocess.Popen(
+            ["pdftoppm", "-f", "1", "-l", "1", "-scale-to-x", str(width), "-scale-to-y", "-1", "-png",
+             "-singlefile", str(pdf), str(work / name)])))
+        while sum(p.poll() is None for _, p in procs) >= 2:        # two at a time
+            procs[[p.poll() is None for _, p in procs].index(True)][1].wait()
+    for name, p in procs:
+        p.wait()
+        imgs[name] = np.asarray(Image.open(work / f"{name}.png").convert("RGB"))
+    return imgs
+
+
+# --------------------------------------------------------------------------- 2. the exact path of an arrow
+def _vid_rounded_polyline(pts, r, step=1.0):
+    """The points of Canvas.rpath(pts, r) - straight pieces and the Bezier corners - every `step` points."""
+    out = [pts[0]]
+
+    def line_to(p):
+        a = out[-1]
+        n = max(1, int(math.hypot(p[0] - a[0], p[1] - a[1]) / step))
+        for i in range(1, n + 1):
+            out.append((a[0] + (p[0] - a[0]) * i / n, a[1] + (p[1] - a[1]) * i / n))
+
+    for i in range(1, len(pts) - 1):
+        a, b, c = pts[i - 1], pts[i], pts[i + 1]
+        la, lc = math.hypot(a[0] - b[0], a[1] - b[1]), math.hypot(c[0] - b[0], c[1] - b[1])
+        rr = min(r, la / 2, lc / 2)
+        if rr < 0.5:
+            line_to(b)
+            continue
+        p1 = (b[0] + (a[0] - b[0]) / la * rr, b[1] + (a[1] - b[1]) / la * rr)
+        p2 = (b[0] + (c[0] - b[0]) / lc * rr, b[1] + (c[1] - b[1]) / lc * rr)
+        line_to(p1)
+        for k in range(1, 25):
+            t = k / 24
+            w = ((1 - t) ** 3, 3 * (1 - t) ** 2 * t + 3 * (1 - t) * t ** 2, t ** 3)
+            out.append((w[0] * p1[0] + w[1] * b[0] + w[2] * p2[0], w[0] * p1[1] + w[1] * b[1] + w[2] * p2[1]))
+    line_to(pts[-1])
+    P = np.array(out, float)
+    S = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
+    return P, S
+
+
+class _VidArrow:
+    """The pixels that belong to one arrow, each with the part of the arrow it is (the line, a trigger dot, the
+    head, a join) and how far along the path it is."""
+
+    def __init__(self, tr, imgs, k, sx, sy):
+        self.tr = tr
+        scene, own = imgs["scene"], imgs[f"e{k}"]
+        ys, xs = np.nonzero(np.any(own != scene, axis=2))
+        self.ys, self.xs, self.vals = ys, xs, own[ys, xs]
+        pt = np.stack([(xs + 0.5) / sx, (ys + 0.5) / sy], axis=1)
+        self.main_P, self.main_S = _vid_rounded_polyline(tr["pts"], tr["rad"])
+        self.L = float(self.main_S[-1])
+        paths = [(self.main_P, self.main_S)]
+        for jp in tr["joins"]:
+            paths.append(_vid_rounded_polyline(jp, 20))
+        dist = np.full(len(pt), np.inf)
+        self.s = np.zeros(len(pt))
+        self.part = np.zeros(len(pt), int)                   # 0 line, 1 dot, 2 head, 3+ joins
+        for j, (P, S) in enumerate(paths):
+            d, idx = _vid_nearest(P, pt)
+            better = d < dist
+            dist[better], self.s[better], self.part[better] = d[better], S[idx[better]], (0 if j == 0 else 2 + j)
+        end = np.array(tr["end"])
+        self.part[np.hypot(*(pt - end).T) <= tr["HEAD"] * 1.25] = 2
+        for dx, dy in tr["dots"]:
+            self.part[np.hypot(pt[:, 0] - dx, pt[:, 1] - dy) <= tr["DOT"] + 5] = 1
+        self.dot_idx = self.part == 1
+        self.head_idx = self.part == 2
+        self.start_xy = tr["pts"][0]
+        self.t0 = self.dur = 0.0
+        self.labels = []
+
+    def front(self, tau):
+        u = min(1.0, max(0.0, (tau - self.t0) / self.dur))
+        return self.L * _vid_ease(u)
+
+    def alpha(self, tau):
+        a = np.zeros(len(self.ys))
+        if tau <= self.t0:
+            return a
+        f = self.front(tau)
+        line = self.part == 0
+        a[line] = np.clip((f - self.s[line]) / VIDEO_SOFT, 0, 1)
+        a[self.dot_idx] = min(1.0, (tau - self.t0) / 0.14)
+        head_start = self.L - self.tr["HEAD"] * 1.25
+        a[self.head_idx] = np.clip((f - head_start) / (self.L - head_start), 0, 1) ** 1.5 if f < self.L else 1.0
+        for j in range(len(self.tr["joins"])):          # joins: a short elbow, drawn in the first 0.3 s
+            m = self.part == 3 + j
+            if m.any():
+                reach = min(1.0, (tau - self.t0) / 0.3) * self.s[m].max()
+                a[m] = np.clip((reach - self.s[m]) / VIDEO_SOFT, 0, 1)
+        return a
+
+
+def _vid_ease(u):
+    """Gentle _vid_ease in and out (half sine, half linear): smooth start and stop without a slow crawl."""
+    return 0.5 * u + 0.5 * (0.5 - 0.5 * math.cos(math.pi * u))
+
+
+def _vid_ease_inv(p):
+    lo, hi = 0.0, 1.0
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if _vid_ease(mid) < p else (lo, mid)
+    return (lo + hi) / 2
+
+
+# --------------------------------------------------------------------------- 3. the order they are drawn in
+def _vid_schedule(arrows):
+    """Start time and duration of every arrow, following the connections of the chart: the arrows that leave the
+    base layer first, then, as soon as a layer has been reached, the arrows that leave that layer."""
+    def plan(v):
+        reached, done = {0: 0.0}, {}
+        order = []
+        todo = list(range(len(arrows)))
+        while todo:
+            ready = [i for i in todo if arrows[i].tr["src"] in reached]
+            if not ready:                                   # a layer nothing leads to: it starts on its own
+                reached[min(arrows[i].tr["src"] for i in todo)] = 0.0
+                continue
+            src = min((arrows[i].tr["src"] for i in ready), key=lambda s: reached[s])
+            group = sorted((i for i in ready if arrows[i].tr["src"] == src), key=lambda i: arrows[i].start_xy[0])
+            for n, i in enumerate(group):
+                a = arrows[i]
+                a.dur = min(VIDEO_MAX_DUR, max(VIDEO_MIN_DUR, a.L / v))
+                a.t0 = reached[src] + (0.12 if src in reached and reached[src] > 0 else 0.0) + n * VIDEO_STAGGER
+                fin = a.t0 + a.dur
+                dst = a.tr["dst"]
+                reached[dst] = min(reached.get(dst, 1e9), fin)
+                order.append(i)
+                todo.remove(i)
+        return max(a.t0 + a.dur for a in arrows)
+
+    lo, hi = 200.0, 60000.0                                  # speed in page points per second
+    for _ in range(60):
+        mid = math.sqrt(lo * hi)
+        if plan(mid) > VIDEO_DRAW_SECONDS:
+            lo = mid
+        else:
+            hi = mid
+    plan(hi)
+
+
+
+def make_video(page, trace, outdir="video", name="keyboard", day=None, width=3840, crf=16):
+    """Write <outdir>/<name>-<day>.mp4 from the flow-chart page and the trace of where its arrows are."""
+    day = day or date.today().isoformat()
+    work = Path(tempfile.mkdtemp(prefix="flowvideo_"))
+    print("rendering the chart in layers ...", file=sys.stderr)
+    imgs = _vid_render_layers(page, trace, width, work)
+    H, W = imgs["full"].shape[:2]
+    W, H = W - W % 2, H - H % 2                                   # even sizes for yuv420
+    imgs = {k: v[:H, :W] for k, v in imgs.items()}
+    sx, sy = W / page.w, H / page.h
+    scene, full = imgs["scene"], imgs["full"]
+
+    arrows = [_VidArrow(t, imgs, k, sx, sy) for k, t in enumerate(trace["edges"])]
+    _vid_schedule(arrows)
+    by_id = {t["id"]: ar for t, ar in zip(trace["edges"], arrows)}
+
+    # labels: the pixels that differ between 'all arrows' and 'the full page', shown when the arrow reaches them
+    lab_changed = np.any(full != imgs["alledges"], axis=2)
+    labels = []
+    for lb in trace["labels"]:
+        ar = by_id[lb["id"]]
+        x, y, w, h = lb["box"]
+        x0, x1, y0, y1 = int((x - 6) * sx), int((x + w + 6) * sx) + 1, int((y - 6) * sy), int((y + h + 6) * sy) + 1
+        m = np.zeros_like(lab_changed)
+        m[max(y0, 0):y1, max(x0, 0):x1] = lab_changed[max(y0, 0):y1, max(x0, 0):x1]
+        ys, xs = np.nonzero(m)
+        P, S = ar.main_P, ar.main_S
+        c = np.array([x + w / 2, y + h / 2])
+        i = int(np.argmin(np.hypot(*(P - c).T)))
+        tang = P[min(i + 3, len(P) - 1)] - P[max(i - 3, 0)]
+        tang = tang / (np.hypot(*tang) or 1)
+        s_trig = min(ar.L, S[i] + 0.5 * w * abs(tang[0]))     # a label sitting on a horizontal piece: after it
+        t_trig = ar.t0 + ar.dur * _vid_ease_inv(s_trig / ar.L)
+        labels.append((t_trig, ys, xs, full[ys, xs]))
+
+    total = VIDEO_HOLD_START + max(ar.t0 + ar.dur for ar in arrows) + 0.25 + VIDEO_HOLD_END
+    n_frames = int(round(total * VIDEO_FPS))
+    print(f"{W}x{H}, {n_frames} frames, {total:.2f} s; arrows finish at "
+          f"{VIDEO_HOLD_START + max(ar.t0 + ar.dur for ar in arrows):.2f} s", file=sys.stderr)
+    for ar in arrows:
+        t = ar.tr
+        print(f"  {t['id']}: layer {t['src']} -> {t['dst']}  start {VIDEO_HOLD_START + ar.t0:.2f}s  "
+              f"draw {ar.dur:.2f}s  ({ar.L:.0f} pt)", file=sys.stderr)
+
+    out_dir = Path(outdir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{name}-{day}.mp4"
+    cmd = [VIDEO_FFMPEG, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
+           "-r", str(VIDEO_FPS), "-i", "-",
+           "-vf", "scale=in_range=full:out_range=tv:out_color_matrix=bt709,format=yuv420p",
+           "-c:v", "libx264", "-preset", "slow", "-crf", str(crf), "-tune", "animation",
+           "-profile:v", "high", "-level", "5.2", "-g", str(VIDEO_FPS * 4), "-r", str(VIDEO_FPS),
+           "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
+           "-movflags", "+faststart", "-an", str(out)]
+    ff = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    last = None
+    done_at = VIDEO_HOLD_START + max(ar.t0 + ar.dur for ar in arrows) + 0.25
+    for k in range(n_frames):
+        t = k / VIDEO_FPS
+        tau = t - VIDEO_HOLD_START
+        if t >= done_at + 0.2:
+            frame = full                                       # the finished chart, exactly as rendered
+        elif tau <= 0:
+            frame = scene
+        else:
+            frame = scene.copy()
+            for ar in arrows:                                  # in the order the chart paints them
+                al = ar.alpha(tau)
+                sel = al > 0
+                if sel.any():
+                    ys, xs, al = ar.ys[sel], ar.xs[sel], al[sel, None]
+                    cur = frame[ys, xs].astype(np.float32)
+                    frame[ys, xs] = np.rint(cur + (ar.vals[sel].astype(np.float32) - cur) * al).astype(np.uint8)
+            for t_trig, ys, xs, vals in labels:
+                al = min(1.0, max(0.0, (tau - t_trig) / 0.18))
+                if al > 0:
+                    cur = frame[ys, xs].astype(np.float32)
+                    frame[ys, xs] = np.rint(cur + (vals.astype(np.float32) - cur) * al).astype(np.uint8)
+        ff.stdin.write(frame.tobytes())
+        if k % 60 == 0:
+            print(f"  frame {k}/{n_frames}", file=sys.stderr)
+    ff.stdin.close()
+    if ff.wait():
+        sys.exit("ffmpeg failed")
+    shutil.rmtree(work, ignore_errors=True)
+    return out
+
+
+
 def main():
     ap = argparse.ArgumentParser(description="Draw a ZMK .keymap or a QMK keymap.c as a 2-page PDF: "
                                              "layer flow chart + keymap text.")
@@ -3224,6 +3721,14 @@ def main():
                     help="do not write current-keymap.pdf / previous-keymaps-visualizer/ / preview.png")
     ap.add_argument("--preview-scale", type=float, default=2.0,
                     help="zoom of the preview.png snapshot (default: 2)")
+    ap.add_argument("--no-video", action="store_true",
+                    help="do not write the video of the flow chart being drawn (video/<keyboard>-<date>.mp4, "
+                         "60 FPS H.264; it needs numpy, scipy, Pillow, pdftoppm and ffmpeg, and is skipped "
+                         "with a note when they are missing)")
+    ap.add_argument("--video-dir", help="folder for the video (default: a folder called video next to the PDF)")
+    ap.add_argument("--video-name", help="keyboard name in the video file name (default: found from the file name)")
+    ap.add_argument("--video-width", type=int, default=3840, help="width of the video in pixels (default: 3840)")
+    ap.add_argument("--video-crf", type=int, default=16, help="x264 quality: lower is better and larger (default: 16)")
     a = ap.parse_args()
 
     config = find_config_dir(a.config)
@@ -3242,7 +3747,18 @@ def main():
     # the PDF and the copies of it go in the folder the command is run from, not
     # in the config folder with the keymap
     out = Path(a.output) if a.output else Path.cwd() / (path.stem + ".pdf")
-    if fmt == "qmk":                      # page 2 is the keymap.c as it is, comments and all
+    global FLOW_TRACE
+    video_note, video_dir = "", None
+    if not a.no_video:
+        try:
+            video_dir = Path(a.video_dir) if a.video_dir else out.parent / "video"
+            video_dir.mkdir(parents=True, exist_ok=True)        # the folder is made when it is not there
+            video_note = _vid_imports()
+        except Exception as err:                                # never let the video get in the way of the PDF
+            video_note = f"could not set it up ({err})"
+        if not video_note:
+            FLOW_TRACE = {"edges": [], "labels": []}
+    if fmt == "qmk":                      # page 2 is the keymap.c without its comments
         pages = [flow_page(layers, combos, row_lens, defines, path.name), source_page(strip_c_comments(text), path.name)]
     else:
         pages = [flow_page(layers, combos, row_lens, defines, path.name),
@@ -3262,6 +3778,22 @@ def main():
         print(f"wrote {png}")
     elif folder is not None:
         print("note: could not render preview.png (no PyMuPDF and no pdftoppm)", file=sys.stderr)
+    if not a.no_video:
+        try:
+            if video_note:
+                print(f"\nNO VIDEO WRITTEN: {video_note}")
+            elif not FLOW_TRACE["edges"]:
+                print("\nno video: the keymap has no arrows to draw (one layer)")
+            else:
+                print("making the video (about 30 seconds) ...", flush=True)
+                movie = make_video(pages[0], FLOW_TRACE, video_dir, a.video_name or keyboard_name(path, text),
+                                   width=a.video_width, crf=a.video_crf)
+                print(f"wrote {movie}  ({movie.stat().st_size / 1e6:.1f} MB)")
+        except BaseException as err:                            # the PDF is already written: the video is a bonus
+            if isinstance(err, KeyboardInterrupt):
+                print("\nvideo stopped")
+            else:
+                print(f"\nNO VIDEO WRITTEN: {err or type(err).__name__}")
     if a.open:
         webbrowser.open(out.resolve().as_uri())
 
