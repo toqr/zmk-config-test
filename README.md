@@ -17,4 +17,4 @@ edit directly from keymap file, with flowchart below (click below)<br><br>
 - assumes that there are layer keys -> if none, will not display
 
 ### video drawer
-<video src="previous-keymaps-visualizer/work-in-progress/kyria-2026-11-12.mp4" controls width="100%"></video>
+<video src="https://raw.githubusercontent.com/toqr/zmk-config-test/main/previous-keymaps-visualizer/work-in-progress/kyria-2026-11-12.mp4" controls width="100%"></video>
