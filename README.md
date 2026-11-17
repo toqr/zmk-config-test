@@ -15,3 +15,7 @@ edit directly from keymap file, with flowchart below (click below)<br><br>
 ### known limitations and assumptions for generate.py
 - parser depends on newlines for rows -> keymap use standard layout (ie 5 keys left, 5 keys right, \n...)
 - assumes that there are layer keys -> if none, will not display
+
+
+### Demo video
+https://github.com/user-attachments/assets/6b3a0110-93ce-449e-9f99-006113cbcc7f
