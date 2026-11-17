@@ -17,5 +17,5 @@ edit directly from keymap file, with flowchart below (click below)<br><br>
 - assumes that there are layer keys -> if none, will not display
 
 <br><br>
-### Demo video
+### demo video
 https://github.com/user-attachments/assets/6b3a0110-93ce-449e-9f99-006113cbcc7f
